@@ -13,6 +13,21 @@ Blazor WebAssembly アプリが、ブラウザ内で Graph DB (GraphRAG) とロ�
 - 取り込み側: クラウドLLM API (Claude API) 利用OK、当面ローカル手動実行
 - 言語: 日本語中心
 
+## Phase 0 POC 結果 (2026-06-13) — 3検証すべて成功
+
+| POC | 結果 | 詳細 |
+|---|---|---|
+| POC-1: DB可搬性 | **成功** | native (ladybug-dotnet 0.17.0) 構築の vector index 込み DB を Chromium 上の wasm エンジンで開き、vector検索・グラフ走査・複合クエリが動作。`poc/poc1-db-portability/README.md` |
+| POC-2: WebLLM連携 | **成功** | Blazor → JS interop → WebLLM (WebGPU) で Qwen3-0.6B が動作。C# に 110 ストリーミングイベント、51.6 tok/s (RTX 4060 Ti)。`poc/poc2-webllm/README.md` |
+| POC-3: 埋め込み一致 | **成功** | OnnxRuntime(.NET) と transformers.js で multilingual-e5-small のトークンID完全一致・コサイン類似度 1.0。`poc/poc3-embeddings/README.md` |
+
+POC で得た設計上の重要知見:
+- **wasm では拡張の INSTALL/LOAD は不要かつ不可** (vector は静的リンク済み)。native 側のみ INSTALL/LOAD する
+- **0.17.x の wasm-core async ラッパーはブラウザでのファイル注入が壊れている** → 本番は sync ビルドを自前 Web Worker でラップし `FS.createDataFile` で DB を注入
+- バージョンペアリング: NuGet `LadybugDB 0.17.0-alpha.1` (engine 0.17.0) ↔ npm `@ladybugdb/wasm-core 0.17.x` (storage format 41 で互換確認済み)
+- 埋め込みは両側で同一 `tokenizer.json` + 同一 ONNX を使えば完全一致 (.NET 側は `Tokenizers.DotNet`)
+- Qwen3 は `<think>` ブロックの除去/無効化処理が必要。0.6B は品質不足、計画通り 1.7B を標準に
+
 ## 実現可否の調査結果 (2026-06 時点) — 結論: 実現可能
 
 | 論点 | 結果 |

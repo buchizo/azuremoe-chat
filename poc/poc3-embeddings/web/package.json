@@ -1,0 +1,11 @@
+{
+  "name": "poc3-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node compare.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.5.0"
+  }
+}

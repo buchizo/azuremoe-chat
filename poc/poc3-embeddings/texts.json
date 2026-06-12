@@ -1,0 +1,7 @@
+[
+  "query: Azure FunctionsとAWS Lambdaの違いは何ですか?",
+  "passage: Cloudflare Pagesは静的サイトをエッジ配信するホスティングサービスです。Blazor WebAssemblyのような静的アセットをそのまま配置できます。",
+  "query: GraphRAGとは何ですか?",
+  "passage: GraphRAGは、ナレッジグラフを使って検索拡張生成の品質を高める手法です。エンティティと関係を抽出してグラフ化し、ベクトル検索とグラフ走査を組み合わせます。",
+  "query: What are the benefits of running an LLM locally in the browser?"
+]
