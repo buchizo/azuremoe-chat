@@ -1,0 +1,14 @@
+{
+  "name": "poc1-webtest",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node node-test.mjs"
+  },
+  "dependencies": {
+    "@ladybugdb/wasm-core": "^0.17.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

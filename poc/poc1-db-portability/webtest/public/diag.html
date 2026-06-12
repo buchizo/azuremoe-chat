@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"><title>FS diagnostic</title></head>
+<body>
+  <pre id="output"></pre>
+  <script type="module">
+    import lbugSync from "/node_modules/@ladybugdb/wasm-core/sync/index.js";
+    const log = (t) => { document.getElementById("output").textContent += t + "\n"; };
+    try {
+      await lbugSync.init();
+      const FS = lbugSync.getFS();
+      const keys = [];
+      for (const k in FS) keys.push(`${k}: ${typeof FS[k]}`);
+      const own = Object.getOwnPropertyNames(FS).map(k => `${k}: ${typeof FS[k]}`);
+      window.__pocResult = {
+        ok: true,
+        version: lbugSync.getVersion(),
+        fsType: Object.prototype.toString.call(FS),
+        enumerable: keys,
+        ownProps: own,
+        hasWriteFile: typeof FS.writeFile,
+        hasMkdir: typeof FS.mkdir,
+        hasCreateDataFile: typeof FS.createDataFile,
+      };
+      log(JSON.stringify(window.__pocResult, null, 2));
+    } catch (e) {
+      window.__pocResult = { ok: false, error: String(e?.stack ?? e) };
+      log("ERROR: " + window.__pocResult.error);
+    }
+  </script>
+</body>
+</html>

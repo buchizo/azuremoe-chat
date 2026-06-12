@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>POC-1: Ladybug DB portability (browser)</title>
+</head>
+<body>
+  <h1>POC-1: desktop-built Ladybug DB in the browser</h1>
+  <pre id="output"></pre>
+  <script type="module">
+    // Uses the sync build on the main thread. The 0.17.x async (worker) wrapper
+    // is broken for file injection: WasmFS browser builds only expose
+    // createDataFile/createPath, not FS.writeFile/mkdir which the worker calls.
+    // Production will wrap this sync build in our own Web Worker.
+    import lbug from "/node_modules/@ladybugdb/wasm-core/sync/index.js";
+
+    const output = document.getElementById("output");
+    const log = (text) => { output.textContent += text + "\n"; };
+    // INT64 columns may come back as BigInt, which JSON.stringify rejects.
+    const plain = (value) => JSON.parse(JSON.stringify(
+      value, (_, v) => typeof v === "bigint" ? Number(v) : v));
+
+    try {
+      await lbug.init();
+      const version = lbug.getVersion();
+      const storageVersion = Number(lbug.getStorageVersion());
+      log(`engine: ${version}, storage version: ${storageVersion}`);
+
+      const resp = await fetch("/poc1.db");
+      if (!resp.ok) throw new Error(`fetch poc1.db: HTTP ${resp.status}`);
+      const bytes = new Uint8Array(await resp.arrayBuffer());
+      log(`fetched poc1.db (${bytes.length} bytes), injecting into wasm FS...`);
+      lbug.getFS().createDataFile("/", "poc1.db", bytes, true, true, true);
+
+      const db = new lbug.Database("/poc1.db");
+      const conn = new lbug.Connection(db);
+      const run = (statement) => {
+        const result = conn.query(statement);
+        if (!result.isSuccess()) {
+          const message = result.getErrorMessage();
+          result.close();
+          throw new Error(`query failed: ${message}\n  ${statement}`);
+        }
+        const rows = plain(result.getAllObjects());
+        result.close();
+        return rows;
+      };
+
+      const vector = run(
+        "CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_idx', CAST([0.1,0.1,1.0,0.1,0.1,0.1,0.1,0.1] AS FLOAT[8]), 4) " +
+        "RETURN node.id AS id, node.text AS text, distance ORDER BY distance");
+      log("vector: " + JSON.stringify(vector, null, 2));
+
+      const traversal = run(
+        "MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) RETURN e.name AS entity, count(*) AS chunks ORDER BY entity");
+      log("traversal: " + JSON.stringify(traversal));
+
+      const combined = run(
+        "CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_idx', CAST([0.1,0.1,1.0,0.1,0.1,0.1,0.1,0.1] AS FLOAT[8]), 2) " +
+        "WITH node AS c, distance MATCH (c)-[:MENTIONS]->(e:Entity) " +
+        "RETURN c.id AS id, e.name AS entity ORDER BY id");
+      log("combined: " + JSON.stringify(combined));
+
+      conn.close();
+      db.close();
+
+      window.__pocResult = { ok: true, version, storageVersion, vector, traversal, combined };
+      log("DONE");
+    } catch (e) {
+      window.__pocResult = { ok: false, error: String(e?.stack ?? e) };
+      log("ERROR: " + String(e?.stack ?? e));
+    }
+  </script>
+</body>
+</html>

@@ -491,3 +491,6 @@ poc/**/node_modules/
 poc/**/*.lbdb
 *.onnx
 
+poc/**/poc1-copy.db
+poc/**/out/
+
