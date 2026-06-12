@@ -1,0 +1,98 @@
+@page "/"
+@using System.Diagnostics
+@inject WebLlmService Llm
+@implements IDisposable
+
+<h1>POC-2: Blazor WASM + WebLLM</h1>
+
+<p>Model: <code>@ModelId</code></p>
+<p>Status: @_status</p>
+<pre style="border: 1px solid #ccc; padding: 8px; min-height: 8em; white-space: pre-wrap;">@_answer</pre>
+
+@code {
+    private const string ModelId = "Qwen3-0.6B-q4f16_1-MLC";
+    private const string Prompt = "Cloudflare PagesとAzure Static Web Appsの違いを2文で説明してください。/no_think";
+
+    private string _status = "starting...";
+    private string _answer = "";
+    private int _tokenEvents;
+    private string? _usageJson;
+    private readonly Stopwatch _stopwatch = new();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        Llm.InitProgress += OnInitProgress;
+        Llm.TokenReceived += OnToken;
+        Llm.UsageReceived += OnUsage;
+        Llm.Completed += OnCompleted;
+
+        try
+        {
+            if (!await Llm.IsWebGpuAvailableAsync())
+            {
+                _status = "WebGPU unavailable";
+                await Llm.PublishResultAsync(new { ok = false, error = "webgpu-unavailable" });
+                StateHasChanged();
+                return;
+            }
+
+            _status = "loading model...";
+            StateHasChanged();
+            await Llm.InitEngineAsync(ModelId);
+
+            _status = "generating...";
+            _stopwatch.Start();
+            StateHasChanged();
+            await Llm.ChatAsync([
+                ("system", "あなたは簡潔に日本語で答えるアシスタントです。"),
+                ("user", Prompt),
+            ]);
+        }
+        catch (Exception e)
+        {
+            _status = $"error: {e.Message}";
+            await Llm.PublishResultAsync(new { ok = false, error = e.ToString() });
+            StateHasChanged();
+        }
+    }
+
+    private void OnInitProgress(string text, double progress)
+    {
+        _status = $"loading: {progress:P0} {text}";
+        StateHasChanged();
+    }
+
+    private void OnToken(string token)
+    {
+        _tokenEvents++;
+        _answer += token;
+        StateHasChanged();
+    }
+
+    private void OnUsage(string usageJson) => _usageJson = usageJson;
+
+    private async void OnCompleted(string fullText)
+    {
+        _stopwatch.Stop();
+        _status = $"done ({_tokenEvents} token events, {_stopwatch.Elapsed.TotalSeconds:F1}s)";
+        StateHasChanged();
+        await Llm.PublishResultAsync(new
+        {
+            ok = true,
+            answer = fullText,
+            tokenEvents = _tokenEvents,
+            elapsedSeconds = _stopwatch.Elapsed.TotalSeconds,
+            usage = _usageJson,
+        });
+    }
+
+    public void Dispose()
+    {
+        Llm.InitProgress -= OnInitProgress;
+        Llm.TokenReceived -= OnToken;
+        Llm.UsageReceived -= OnUsage;
+        Llm.Completed -= OnCompleted;
+    }
+}

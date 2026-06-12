@@ -1,0 +1,11 @@
+{
+  "name": "poc2-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node browser-test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

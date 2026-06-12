@@ -494,3 +494,9 @@ poc/**/*.lbdb
 poc/**/poc1-copy.db
 poc/**/out/
 
+
+# POC local caches
+poc/**/.chrome-profile/
+poc/**/.probe-profile/
+poc/poc3-embeddings/model/
+
