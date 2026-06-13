@@ -5,11 +5,9 @@
 // transformers.js v4+ required — Qwen3.5 (qwen3_5) support was added in v4.
 import { pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4";
 
-let pipe         = null;   // transformers.js pipeline (null when using built-in AI)
+let pipe         = null;
 let useBuiltinAI = false;
 let activeDevice = "wasm";
-
-// Saved at load time so the generate handler can reload on WASM fallback.
 let loadedModelId = null;
 let loadedDtype   = "q4";
 
@@ -58,14 +56,53 @@ function isGpuDeviceLost(err) {
          msg.includes("Invalid Buffer");
 }
 
-// ONNX operator not available on the chosen backend/dtype combination.
-// GatherBlockQuantized is used by q4 block-quantized models and is NOT
-// supported on WebGPU; it may also be absent on older WASM builds.
+// ONNX operator not available on the chosen backend/dtype.
+// GatherBlockQuantized is used by q4 block-quantized models; it is NOT
+// supported on WebGPU and may be absent on some WASM builds.
 function isOperatorUnsupported(err) {
   const msg = String(err?.message ?? err);
   return msg.includes("GatherBlockQuantized") ||
          msg.includes("Could not find an implementation") ||
          msg.includes("NOT_IMPLEMENTED");
+}
+
+// Try to load a pipeline, falling back to null task-auto-detect for VL models.
+async function tryPipeline(modelId, opts) {
+  try {
+    return await pipeline("text-generation", modelId, opts);
+  } catch (e) {
+    if (String(e).includes("does not support")) {
+      return await pipeline(null, modelId, opts);
+    }
+    throw e;
+  }
+}
+
+// Load pipeline on WASM trying dtypes in order until one works.
+// Returns the loaded pipeline; throws if all dtypes fail.
+// Reports each retry via a progress-like token to the given message id.
+async function loadOnWasm(modelId, dtypes, msgId) {
+  let lastErr;
+  for (let i = 0; i < dtypes.length; i++) {
+    const dt = dtypes[i];
+    try {
+      const p = await tryPipeline(modelId, { dtype: dt, device: "wasm" });
+      loadedDtype  = dt;
+      activeDevice = "wasm";
+      return p;
+    } catch (e) {
+      lastErr = e;
+      if (isOperatorUnsupported(e) && i < dtypes.length - 1) {
+        const next = dtypes[i + 1];
+        self.postMessage({ id: msgId, type: "progress", payload: {
+          file: `wasm/${dt} 不可 → wasm/${next} で再試行`, pct: 0,
+        }});
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 self.onmessage = async ({ data: { id, type, payload } }) => {
@@ -96,47 +133,33 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
 
       // 2. transformers.js — waterfall of (device, dtype) strategies.
       //
-      // Some quantization formats (e.g. q4 block-quantized) use the
-      // GatherBlockQuantized ONNX operator which is unsupported on WebGPU
-      // and may be absent on some WASM builds.  We fall through strategies
-      // until one works, reporting each retry as a progress message.
-      //
-      // Strategies tried in order:
-      //   a) detected device   + configured dtype
-      //   b) wasm              + configured dtype   (if a used webgpu)
-      //   c) wasm              + "q8"               (avoids GatherBlockQuantized)
+      // q4 block-quantized models use GatherBlockQuantized which is NOT
+      // supported on WebGPU and may be absent on some WASM builds.
+      // We fall through strategies until one succeeds.
       useBuiltinAI  = false;
       const detected = await detectDevice();
       activeDevice   = detected;
 
-      const progressCallback = (info) => {
+      const progressCb = (info) => {
         if (info.status === "progress") {
           const pct = info.total > 0 ? Math.round(info.loaded / info.total * 100) : 0;
           self.postMessage({ id, type: "progress", payload: { file: info.file ?? "", pct } });
         }
       };
 
-      // Build the strategy list
+      // Strategy list: webgpu → wasm (same dtype) → wasm/q8 → wasm/fp16
       const strategies = [];
       strategies.push({ device: detected, dtype });
       if (detected === "webgpu") strategies.push({ device: "wasm", dtype });
-      if (dtype !== "q8") strategies.push({ device: "wasm", dtype: "q8" });
+      if (dtype !== "q8")  strategies.push({ device: "wasm", dtype: "q8" });
+      if (dtype !== "fp16") strategies.push({ device: "wasm", dtype: "fp16" });
 
       let lastError = null;
-      for (const s of strategies) {
+      for (let i = 0; i < strategies.length; i++) {
+        const s = strategies[i];
         try {
-          const opts = { dtype: s.dtype, device: s.device, progress_callback: progressCallback };
-          let p;
-          try {
-            p = await pipeline("text-generation", modelId, opts);
-          } catch (e) {
-            if (String(e).includes("does not support")) {
-              p = await pipeline(null, modelId, opts);
-            } else {
-              throw e;
-            }
-          }
-          pipe         = p;
+          const opts = { dtype: s.dtype, device: s.device, progress_callback: progressCb };
+          pipe         = await tryPipeline(modelId, opts);
           activeDevice = s.device;
           loadedDtype  = s.dtype;
           lastError    = null;
@@ -144,16 +167,15 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         } catch (e) {
           lastError = e;
           if (isOperatorUnsupported(e) || isGpuDeviceLost(e)) {
-            // Recoverable: log and try next strategy
-            const next = strategies[strategies.indexOf(s) + 1];
-            if (next) {
+            if (i + 1 < strategies.length) {
+              const next = strategies[i + 1];
               self.postMessage({ id, type: "progress", payload: {
                 file: `${s.device}/${s.dtype} 不可 → ${next.device}/${next.dtype} で再試行`, pct: 0,
               }});
             }
             continue;
           }
-          throw e;  // unrecoverable (e.g. network error, wrong model ID)
+          throw e;
         }
       }
       if (lastError) throw lastError;
@@ -214,17 +236,21 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         try {
           await runInference(pipe);
         } catch (e) {
-          // WebGPU device lost during inference — reload pipeline on WASM CPU and retry.
-          if (isGpuDeviceLost(e) && activeDevice === "webgpu" && loadedModelId) {
+          // Trigger WASM fallback on:
+          //   - GPU device lost during inference (OrtRun, Device lost, etc.)
+          //   - Unsupported operator at runtime (GatherBlockQuantized on WebGPU)
+          const needsFallback = (isGpuDeviceLost(e) || isOperatorUnsupported(e)) && loadedModelId;
+          if (needsFallback) {
             fullText = "";
             self.postMessage({ id, type: "token", payload: {
-              token: "⚠ WebGPU エラーが発生しました。CPU (WASM) に切り替えて再試行します...\n\n",
+              token: "⚠ GPU エラーが発生しました。CPU (WASM) に切り替えて再試行します...\n\n",
             }});
-            activeDevice = "wasm";
-            pipe = await pipeline("text-generation", loadedModelId, {
-              dtype: loadedDtype,
-              device: "wasm",
-            });
+
+            // Dtype waterfall on WASM: current dtype → q8 → fp16
+            const dtypeFallbacks = [loadedDtype, "q8", "fp16"]
+              .filter((v, i, a) => a.indexOf(v) === i);  // deduplicate
+            pipe = await loadOnWasm(loadedModelId, dtypeFallbacks, id);
+
             fullText = "";
             await runInference(pipe);
           } else {
