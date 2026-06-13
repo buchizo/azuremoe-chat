@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AzureMoe.Chat.Web</RootNamespace>
+    <OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Markdig" Version="0.37.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.9" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.9" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- npm install @ladybugdb/wasm-core into wwwroot/node_modules on first build -->
+  <Target Name="NpmInstall" BeforeTargets="Build" Condition="!Exists('$(MSBuildProjectDirectory)/wwwroot/node_modules')">
+    <Message Text="Running npm install in wwwroot..." Importance="high" />
+    <Exec Command="npm install --quiet" WorkingDirectory="$(MSBuildProjectDirectory)/wwwroot" />
+  </Target>
+
+</Project>

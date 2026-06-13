@@ -1,0 +1,81 @@
+/* Scoped styles for Home.razor — terminal-style chat UI.
+   NOTE: styles targeting MarkupString-injected markdown elements
+         (headings, lists, code, etc.) live in app.css because
+         Blazor scoped CSS cannot match them (no scope attribute). */
+
+.terminal {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font);
+    font-size: 14px;
+    padding: 0;
+    overflow: hidden;
+}
+
+.output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem 1.5rem;
+    line-height: 1.65;
+    word-break: break-word;
+}
+
+/* ── Base line types ────────────────────────────────────────────────────── */
+.line           { white-space: pre-wrap; padding: 1px 0; }
+.line.title     { color: var(--green);  font-weight: bold; font-size: 15px; }
+.line.dim       { color: var(--fg-dim); }
+.line.info      { color: var(--blue); }
+.line.ok        { color: var(--green); }
+.line.warn      { color: var(--orange); }
+.line.error     { color: var(--red); }
+.line.status    { color: var(--fg-dim); font-style: italic; }
+.line.heading   { color: var(--purple); margin-top: 4px; }
+.line.user-input{ color: var(--blue); font-weight: bold; }
+.line.result, .line.result-url, .line.snippet, .line.source { color: var(--fg); }
+.line.blank     { height: .5rem; }
+
+/* ── AI response container ──────────────────────────────────────────────── */
+/* white-space: normal overrides pre-wrap so markdown block elements lay out.
+   Child element styles (.ai p, .ai ul, etc.) are in app.css.              */
+.line.ai,
+.line.ai-stream {
+    white-space: normal;
+    color: var(--fg);
+    padding: 2px 0;
+    line-height: 1.75;
+}
+.line.ai-stream { opacity: 0.9; }
+
+/* ── Input row ──────────────────────────────────────────────────────────── */
+.input-row {
+    display: flex;
+    align-items: center;
+    padding: .5rem 1.5rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg2);
+    gap: .5rem;
+    flex-shrink: 0;
+}
+
+.prompt-symbol {
+    color: var(--green);
+    font-size: 14px;
+    user-select: none;
+}
+
+.chat-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--fg);
+    font-family: var(--font);
+    font-size: 14px;
+    caret-color: var(--green);
+}
+
+.chat-input::placeholder { color: var(--fg-dim); }
+.chat-input:disabled     { opacity: .5; cursor: wait; }

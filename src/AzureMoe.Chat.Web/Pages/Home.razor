@@ -1,0 +1,322 @@
+@page "/"
+@using AzureMoe.Chat.Web.Services
+@inject IJSRuntime JS
+@inject AssetLoader AssetLoader
+@inject JsGraphStore GraphStore
+@inject JsEmbedder Embedder
+@inject JsLlmEngine LlmEngine
+@inject RagPipeline Rag
+@inject AppConfig Cfg
+@implements IAsyncDisposable
+
+<PageTitle>AzureMoe Chat</PageTitle>
+
+<div class="terminal" @ref="_terminalRef">
+    <div class="output" id="chat-output" @ref="_outputRef">
+        @foreach (var line in _lines)
+        {
+            <div class="line @line.Css">@((MarkupString)line.Html)</div>
+        }
+        @if (_streamBuf.Length > 0)
+        {
+            <div class="line ai-stream">@((MarkupString)RenderMarkdown(_streamBuf.ToString()))</div>
+        }
+    </div>
+
+    @if (_ready)
+    {
+        <div class="input-row">
+            <span class="prompt-symbol">&gt;</span>
+            <input @ref="_inputRef"
+                   @bind="_inputText"
+                   @bind:event="oninput"
+                   @onkeydown="OnKeyDown"
+                   class="chat-input"
+                   disabled="@_busy"
+                   placeholder="@(_busy ? "応答中..." : "質問を入力して Enter")"
+                   autocomplete="off"
+                   spellcheck="false" />
+        </div>
+    }
+</div>
+
+@code {
+    // ── UI state ────────────────────────────────────────────────────────────
+    record Line(string Html, string Css = "");
+
+    private readonly List<Line> _lines    = [];
+    private readonly StringBuilder _streamBuf = new();
+    private readonly List<ChatMessage> _history = [];
+
+    private string _inputText = "";
+    private bool   _ready     = false;
+    private bool   _busy      = false;
+    private ElementReference _terminalRef;
+    private ElementReference _outputRef;
+    private ElementReference _inputRef;
+
+    private CancellationTokenSource _cts = new();
+
+    // Markdown pipeline — static, shared, thread-safe.
+    private static readonly MarkdownPipeline _mdPipeline = new MarkdownPipelineBuilder()
+        .UseAutoLinks()
+        .UsePipeTables()
+        .UseEmphasisExtras()
+        .DisableHtml()        // don't allow raw HTML pass-through in LLM output
+        .Build();
+
+    // ── Lifecycle ───────────────────────────────────────────────────────────
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await RunStartupAsync();
+            return;
+        }
+        // Auto-scroll to bottom after every render (streaming tokens, new lines, etc.)
+        try { await JS.InvokeVoidAsync("scrollElementToBottom", _outputRef); } catch { }
+    }
+
+    private async Task RunStartupAsync()
+    {
+        Print("=== AzureMoe Chat ===", "title");
+        Print("GraphRAG + ブラウザ内 LLM", "dim");
+        PrintBlank();
+
+        try
+        {
+            // ── Step 1: manifest ──
+            Status("manifest.json を読み込み中...");
+            var manifest = await AssetLoader.LoadManifestAsync(_cts.Token);
+            Print($"DB: {manifest.DatabaseFile}  " +
+                  $"投稿 {manifest.PostCount} 件 / チャンク {manifest.ChunkCount} 件", "info");
+
+            // ── Step 2: DB download ──
+            Status("GraphDB をダウンロード中...");
+            byte[]? dbBytes = null;
+            var dbProg = new Progress<(long Recv, long Total)>(t =>
+            {
+                var pct = t.Total > 0 ? (int)(t.Recv * 100 / t.Total) : 0;
+                Status($"GraphDB ダウンロード中... {pct}%  ({t.Recv / 1024:N0} KB)");
+            });
+            dbBytes = await AssetLoader.LoadDbAsync(manifest, dbProg, _cts.Token);
+            Print($"DB ダウンロード完了 ({dbBytes.Length / 1024:N0} KB)", "ok");
+
+            // ── Step 3: LadybugDB init ──
+            Status("GraphDB を初期化中...");
+            await GraphStore.InitAsync(dbBytes, _cts.Token);
+            Print("GraphDB 初期化完了", "ok");
+
+            // ── Step 4: Embedding model ──
+            Status($"埋め込みモデルを読み込み中 ({Cfg.EmbeddingModelId})...");
+            var embedProg = new Progress<(string File, int Pct)>(t =>
+                Status($"埋め込みモデル: {t.File} {t.Pct}%"));
+            await Embedder.LoadAsync(Cfg.EmbeddingModelId, embedProg, _cts.Token);
+            Print("埋め込みモデル準備完了", "ok");
+
+            // ── Step 5: LLM info (loaded on first query) ──
+            var hasBuiltinAi = await LlmEngine.CheckBuiltinAiAsync(_cts.Token);
+            if (hasBuiltinAi)
+                Print("LLM: Chrome 組み込み AI (Gemini Nano)  利用可能 — ダウンロード不要", "info");
+            else
+                Print($"LLM: {Cfg.LlmModelId} ({Cfg.LlmDtype})  初回クエリ時に自動ダウンロード", "info");
+
+            PrintBlank();
+            PrintHelp();
+            PrintBlank();
+            _ready = true;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Print($"起動エラー: {ex.Message}", "error");
+        }
+
+        StateHasChanged();
+        await FocusInputAsync();
+    }
+
+    // ── Input handling ──────────────────────────────────────────────────────
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key != "Enter" || _busy || string.IsNullOrWhiteSpace(_inputText))
+            return;
+
+        var input = _inputText.Trim();
+        _inputText = "";
+        await HandleInputAsync(input);
+    }
+
+    private async Task HandleInputAsync(string input)
+    {
+        PrintBlank();
+        Print($"&gt; {EscapeHtml(input)}", "user-input");
+        PrintBlank();
+
+        // Built-in commands
+        if (input.StartsWith('/') || input.StartsWith('\\'))
+        {
+            await HandleCommandAsync(input.TrimStart('/', '\\').Trim().ToLowerInvariant());
+            return;
+        }
+
+        // RAG query
+        _busy = true;
+        StateHasChanged();
+        try
+        {
+            // Load LLM on first use.
+            // Priority: Chrome built-in AI (no download) → WebGPU → WASM CPU.
+            if (!LlmEngine.IsLoaded)
+            {
+                var builtinAi = await LlmEngine.CheckBuiltinAiAsync(_cts.Token);
+                if (builtinAi)
+                    Status("LLM を初期化中 (Chrome 組み込み AI)...");
+                else
+                    Status($"LLM をダウンロード中 ({Cfg.LlmModelId})...");
+
+                var llmProg = new Progress<(string Text, int Pct)>(t =>
+                    Status($"LLM: {t.Text}  {t.Pct}%"));
+                await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, llmProg, _cts.Token);
+                Print($"LLM 準備完了  [{LlmEngine.Device}]", "ok");
+                PrintBlank();
+            }
+
+            {
+                IReadOnlyList<ChunkResult>? sources = null;
+                _streamBuf.Clear();
+                StateHasChanged();
+
+                sources = await Rag.RunAsync(
+                    input, _history,
+                    onToken: async delta =>
+                    {
+                        // _streamBuf holds raw text — Blazor's @ binding auto-escapes it.
+                        _streamBuf.Append(delta);
+                        StateHasChanged();
+                        await Task.Yield();
+                    },
+                    onCompleted: full =>
+                    {
+                        // Render completed response as Markdown HTML.
+                        Print(RenderMarkdown(full), "ai");
+                        _streamBuf.Clear();
+                        _history.Add(new ChatMessage("user", input));
+                        _history.Add(new ChatMessage("assistant", full));
+                        if (_history.Count > 20) _history.RemoveRange(0, 2);
+                    },
+                    ct: _cts.Token);
+
+                StateHasChanged();
+                PrintBlank();
+                PrintSources(sources);
+            }
+        }
+        catch (OperationCanceledException) { Print("キャンセルされました", "warn"); }
+        catch (Exception ex) { Print($"エラー: {EscapeHtml(ex.Message)}", "error"); }
+        finally
+        {
+            _busy = false;
+            StateHasChanged();
+            await FocusInputAsync();
+        }
+    }
+
+    private async Task HandleCommandAsync(string cmd)
+    {
+        switch (cmd)
+        {
+            case "help":
+                PrintHelp();
+                break;
+            case "clear":
+                _lines.Clear();
+                _history.Clear();
+                break;
+            case "history":
+                Print($"履歴: {_history.Count / 2} ターン", "info");
+                break;
+            case "model":
+                if (LlmEngine.IsLoaded && LlmEngine.Device == "built-in")
+                {
+                    Print($"LLM     : Chrome 組み込み AI (Gemini Nano)  [読み込み済み / built-in]", "info");
+                }
+                else
+                {
+                    var llmStatus = LlmEngine.IsLoaded ? $"[{LlmEngine.Device}]" : "[未読み込み]";
+                    Print($"LLM     : {Cfg.LlmModelId} ({Cfg.LlmDtype})  {llmStatus}", "info");
+                }
+                Print($"埋め込み: {Cfg.EmbeddingModelId}", "info");
+                break;
+            case "reload":
+                _lines.Clear();
+                _history.Clear();
+                await RunStartupAsync();
+                return;
+            default:
+                Print($"不明なコマンド: /{cmd}  (/help で一覧)", "warn");
+                break;
+        }
+        StateHasChanged();
+    }
+
+    // ── Output helpers ──────────────────────────────────────────────────────
+
+    private void Print(string html, string css = "")         => _lines.Add(new Line(html, css));
+    private void PrintBlank()                                => _lines.Add(new Line("&nbsp;", "blank"));
+    private void Status(string msg)
+    {
+        // Replace last status line or append
+        if (_lines.Count > 0 && _lines[^1].Css == "status")
+            _lines[^1] = new Line(EscapeHtml(msg), "status");
+        else
+            _lines.Add(new Line(EscapeHtml(msg), "status"));
+        StateHasChanged();
+    }
+
+    private void PrintHelp()
+    {
+        Print("コマンド:", "heading");
+        Print("  /help     — このヘルプを表示", "dim");
+        Print("  /model    — 現在のモデル情報", "dim");
+        Print("  /history  — 会話履歴の件数", "dim");
+        Print("  /clear    — 画面と会話履歴をクリア", "dim");
+        Print("  /reload   — 再起動", "dim");
+        Print("それ以外は RAG クエリとして実行されます", "dim");
+    }
+
+    private void PrintSources(IReadOnlyList<ChunkResult>? sources)
+    {
+        if (sources is null || sources.Count == 0) return;
+        Print("参考記事:", "heading");
+        for (var i = 0; i < sources.Count; i++)
+        {
+            var c    = sources[i];
+            var sim  = (1.0 - c.Distance).ToString("F3");
+            var date = c.Date.Length >= 10 ? c.Date[..10] : c.Date;
+            Print($"<span class='rank'>[{i + 1}]</span> <span class='sim'>{sim}</span>  " +
+                  $"<a class='url' href='{EscapeHtml(c.Url)}' target='_blank'>{EscapeHtml(c.Title)}</a>" +
+                  $"  <span class='dim'>{date}</span>", "source");
+        }
+    }
+
+    // Converts markdown to safe HTML. Raw HTML pass-through is disabled (DisableHtml).
+    private static string RenderMarkdown(string text)
+        => Markdown.ToHtml(text, _mdPipeline);
+
+    private static string EscapeHtml(string s) =>
+        s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+
+    private async Task FocusInputAsync()
+    {
+        try { await _inputRef.FocusAsync(); } catch { }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await _cts.CancelAsync();
+        _cts.Dispose();
+    }
+}

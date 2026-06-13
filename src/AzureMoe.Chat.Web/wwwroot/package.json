@@ -1,0 +1,8 @@
+{
+  "name": "azuremoe-chat-web",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ladybugdb/wasm-core": "^0.17.1"
+  }
+}

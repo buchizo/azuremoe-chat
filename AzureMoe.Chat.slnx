@@ -2,5 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/AzureMoe.Chat.Core/AzureMoe.Chat.Core.csproj" />
     <Project Path="src/AzureMoe.Chat.Ingest/AzureMoe.Chat.Ingest.csproj" />
+    <Project Path="src/AzureMoe.Chat.Verify/AzureMoe.Chat.Verify.csproj" />
+    <Project Path="src/AzureMoe.Chat.Web/AzureMoe.Chat.Web.csproj" />
   </Folder>
 </Solution>
