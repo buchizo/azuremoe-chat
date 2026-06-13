@@ -1,2 +1,6 @@
 <Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AzureMoe.Chat.Core/AzureMoe.Chat.Core.csproj" />
+    <Project Path="src/AzureMoe.Chat.Ingest/AzureMoe.Chat.Ingest.csproj" />
+  </Folder>
 </Solution>

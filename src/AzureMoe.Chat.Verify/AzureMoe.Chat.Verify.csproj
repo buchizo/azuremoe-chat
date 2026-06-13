@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Ingest プロジェクトを参照して E5Embedder / LadybugDB を再利用 -->
+  <ItemGroup>
+    <ProjectReference Include="..\AzureMoe.Chat.Ingest\AzureMoe.Chat.Ingest.csproj" />
+  </ItemGroup>
+
+</Project>
