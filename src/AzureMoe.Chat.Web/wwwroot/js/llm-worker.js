@@ -21,12 +21,12 @@ if (self.crossOriginIsolated) {
   env.backends.onnx.wasm.numThreads = 1;
 }
 
-// WebGPU is disabled: this machine's WebGPU (Dawn/GPU driver) fails with a
-// different low-level error for every dtype (Invalid Buffer, unaligned access,
-// memory access out of bounds) — a driver-level problem, not a model/code one.
-// Running CPU (WASM) only. Re-enable (true) only after the GPU driver/browser
-// is fixed; the worker-restart WASM fallback in llm-interop.js still covers it.
-const ENABLE_WEBGPU = false;
+// Use WebGPU when the environment supports it, else fall back to CPU (WASM).
+// detectDevice() picks WebGPU only if navigator.gpu yields an adapter, so
+// non-capable environments transparently get WASM. If WebGPU dies at runtime,
+// llm-interop.js restarts the worker on WASM automatically. The current model
+// (LFM2.5-1.2B-JP-ONNX) is built for ONNX Runtime Web + WebGPU.
+const ENABLE_WEBGPU = true;
 
 // Chrome's built-in Gemini Nano is a DIFFERENT model than the configured one.
 // Disabled so the configured LLM is always what runs.
