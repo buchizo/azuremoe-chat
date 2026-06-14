@@ -1,7 +1,10 @@
 // Web Worker: wraps @ladybugdb/wasm-core sync build.
 // The sync build embeds the WASM binary as a data URL — no separate .wasm fetch needed.
 // This module worker is created by ladybug-interop.js from the main thread.
-import lbug from "../node_modules/@ladybugdb/wasm-core/sync/index.js";
+// Imported from wwwroot/lib/ladybug, where the build copies the bundle out of
+// node_modules (node_modules is excluded from static web assets, so importing it
+// directly 404s on publish). See CopyLadybugRuntime in the .csproj.
+import lbug from "../lib/ladybug/index.js";
 
 let conn = null;
 let db   = null;

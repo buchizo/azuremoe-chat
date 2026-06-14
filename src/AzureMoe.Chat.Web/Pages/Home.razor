@@ -11,6 +11,24 @@
 
 <PageTitle>AzureMoe Chat</PageTitle>
 
+@if (!_accepted)
+{
+    <div class="splash">
+        <pre class="splash-logo">   _                      __  __
+  /_\   _____  _ _ ___   |  \/  |___  ___
+ / _ \ |_ / || | '_/ -_) | |\/| / _ \/ -_)
+/_/ \_\/__/\_,_|_| \___| |_|  |_\___/\___|
+      Chat — powered by GraphRAG</pre>
+        <div class="splash-desc">GraphRAG + ブラウザ内 LLM</div>
+        <button class="splash-accept" @onclick="AcceptAsync">Accept</button>
+        <footer class="app-footer splash-footer">
+            <a class="url" href="terms.html" target="_blank" rel="noopener">利用規約 (Terms of Use)</a>
+            <span class="copyright">© 2026 kosmos.ebi</span>
+        </footer>
+    </div>
+}
+else
+{
 <div class="terminal" @ref="_terminalRef">
     <div class="output" id="chat-output" @ref="_outputRef">
         @foreach (var line in _lines)
@@ -38,7 +56,12 @@
                    spellcheck="false" />
         </div>
     }
+    <footer class="app-footer terminal-footer">
+        <a class="url" href="terms.html" target="_blank" rel="noopener">利用規約 (Terms of Use)</a>
+        <span class="copyright">© 2026 kosmos.ebi</span>
+    </footer>
 </div>
+}
 
 @code {
     // ── UI state ────────────────────────────────────────────────────────────
@@ -49,6 +72,7 @@
     private readonly List<ChatMessage> _history = [];
 
     private string _inputText = "";
+    private bool   _accepted  = false;
     private bool   _ready     = false;
     private bool   _busy      = false;
     private ElementReference _terminalRef;
@@ -69,13 +93,22 @@
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        // Startup no longer runs automatically: the splash screen gates it behind
+        // an explicit Accept click (see AcceptAsync). firstRender therefore does
+        // nothing here — the boot sequence begins only once the user accepts.
         if (firstRender)
-        {
-            await RunStartupAsync();
             return;
-        }
         // Auto-scroll to bottom after every render (streaming tokens, new lines, etc.)
         try { await JS.InvokeVoidAsync("scrollElementToBottom", _outputRef); } catch { }
+    }
+
+    // Splash → main transition. The terminal and boot sequence appear only after
+    // the user clicks Accept; until then the splash gate is shown.
+    private async Task AcceptAsync()
+    {
+        _accepted = true;
+        StateHasChanged();
+        await RunStartupAsync();
     }
 
     private async Task RunStartupAsync()
@@ -307,8 +340,14 @@
 
     private void PrintLicenses()
     {
-        Print("ライセンス情報 (Third-Party Licenses)", "heading");
-        Print("本アプリが利用するモデル・ライブラリのライセンス一覧です。", "dim");
+        Print("ライセンス情報 (License / Third-Party Licenses)", "heading");
+        Print("本アプリ本体および利用するモデル・ライブラリのライセンス一覧です。", "dim");
+        PrintBlank();
+
+        // ── This app ──
+        Print("● 本アプリ (AzureMoe Chat)", "heading");
+        Print("  MIT License — Copyright (c) 2026 kosmos.ebi", "info");
+        Print("  " + Link("LICENSE", "LICENSE 全文 (リポジトリルート)"), "source");
         PrintBlank();
 
         // ── LLM model ──

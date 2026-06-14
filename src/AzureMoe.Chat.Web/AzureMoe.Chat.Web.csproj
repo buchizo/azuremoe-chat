@@ -14,10 +14,47 @@
     <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.9" PrivateAssets="all" />
   </ItemGroup>
 
-  <!-- npm install @ladybugdb/wasm-core into wwwroot/node_modules on first build -->
-  <Target Name="NpmInstall" BeforeTargets="Build" Condition="!Exists('$(MSBuildProjectDirectory)/wwwroot/node_modules')">
+  <!-- The LadybugDB sync bundle is copied out of node_modules into wwwroot/lib at
+       build time (see CopyLadybugRuntime). That generated copy is registered as a
+       static web asset explicitly there, so remove it from the default Content glob
+       to avoid an NETSDK1022 duplicate-Content error. -->
+  <ItemGroup>
+    <Content Remove="wwwroot\lib\ladybug\**" />
+  </ItemGroup>
+
+  <!-- npm install @ladybugdb/wasm-core into wwwroot/node_modules on first build.
+       Hooked before static-asset resolution (not just Build) so the bundle exists
+       before CopyLadybugRuntime needs it. -->
+  <Target Name="NpmInstall" BeforeTargets="ResolveProjectStaticWebAssets;Build" Condition="!Exists('$(MSBuildProjectDirectory)/wwwroot/node_modules')">
     <Message Text="Running npm install in wwwroot..." Importance="high" />
     <Exec Command="npm install --quiet" WorkingDirectory="$(MSBuildProjectDirectory)/wwwroot" />
+  </Target>
+
+  <!-- node_modules is excluded from static web assets, so the worker's import would
+       404 on publish. Copy the self-contained sync bundle (WASM embedded as a data
+       URL — single file, no relative imports) into wwwroot/lib/ladybug and register
+       it as a static web asset, so it lands in the build manifest and is served both
+       in dev and after publish. Runs before ResolveProjectStaticWebAssets so the
+       freshly-copied file is included in this same build. -->
+  <Target Name="CopyLadybugRuntime"
+          DependsOnTargets="NpmInstall"
+          BeforeTargets="ResolveProjectStaticWebAssets;Build"
+          Inputs="wwwroot\node_modules\@ladybugdb\wasm-core\sync\index.js"
+          Outputs="wwwroot\lib\ladybug\index.js">
+    <Copy SourceFiles="wwwroot\node_modules\@ladybugdb\wasm-core\sync\index.js"
+          DestinationFiles="wwwroot\lib\ladybug\index.js"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <!-- Register the generated bundle as a Content item (and thus a static web asset).
+       Kept separate from CopyLadybugRuntime's incremental Inputs/Outputs so the item
+       is added on every build, even when the copy itself is skipped as up-to-date. -->
+  <Target Name="IncludeLadybugRuntimeAsset"
+          DependsOnTargets="CopyLadybugRuntime"
+          BeforeTargets="ResolveProjectStaticWebAssets;Build">
+    <ItemGroup>
+      <Content Include="wwwroot\lib\ladybug\index.js" />
+    </ItemGroup>
   </Target>
 
 </Project>

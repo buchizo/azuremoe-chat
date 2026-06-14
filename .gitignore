@@ -297,6 +297,9 @@ FakesAssemblies/
 .ntvs_analysis.dat
 node_modules/
 
+# LadybugDB runtime bundle copied out of node_modules at build time (see csproj)
+src/AzureMoe.Chat.Web/wwwroot/lib/ladybug/
+
 # Visual Studio 6 build log
 *.plg
 
