@@ -234,6 +234,14 @@
             case "clear":
                 _lines.Clear();
                 _history.Clear();
+                // Leave a marker so the cleared screen isn't just a black void.
+                Print("=== AzureMoe Chat ===", "title");
+                Print("画面と会話履歴をクリアしました。質問を入力してください。 (/help でコマンド一覧)", "dim");
+                PrintBlank();
+                break;
+            case "license":
+            case "licenses":
+                PrintLicenses();
                 break;
             case "history":
                 Print($"履歴: {_history.Count / 2} ターン", "info");
@@ -282,9 +290,52 @@
         Print("  /help     — このヘルプを表示", "dim");
         Print("  /model    — 現在のモデル情報", "dim");
         Print("  /history  — 会話履歴の件数", "dim");
+        Print("  /license  — ライセンス情報を表示", "dim");
         Print("  /clear    — 画面と会話履歴をクリア", "dim");
         Print("  /reload   — 再起動", "dim");
         Print("それ以外は RAG クエリとして実行されます", "dim");
+    }
+
+    // Link helper — href is always a trusted literal we author below.
+    private static string Link(string url, string text) =>
+        $"<a class='url' href='{url}' target='_blank' rel='noopener'>{EscapeHtml(text)}</a>";
+
+    private void PrintLicenses()
+    {
+        Print("ライセンス情報 (Third-Party Licenses)", "heading");
+        Print("本アプリが利用するモデル・ライブラリのライセンス一覧です。", "dim");
+        PrintBlank();
+
+        // ── LLM model ──
+        Print("● LLM モデル", "heading");
+        Print($"  {EscapeHtml(Cfg.LlmModelId)}", "info");
+        Print("  LFM Open License v1.0 (lfm1.0) — Liquid AI, Inc.", "dim");
+        Print("  ⚠ このライセンスは再配布時に LICENSE ファイル本体の同梱が必要です。", "warn");
+        Print("  " + Link("https://huggingface.co/LiquidAI/LFM2.5-1.2B-JP-202606/blob/main/LICENSE",
+                          "LFM Open License v1.0 全文 (HuggingFace)"), "source");
+        PrintBlank();
+
+        // ── Embedding model ──
+        Print("● 埋め込みモデル", "heading");
+        Print($"  {EscapeHtml(Cfg.EmbeddingModelId)} — MIT License", "info");
+        Print("  " + Link("https://huggingface.co/intfloat/multilingual-e5-small",
+                          "intfloat/multilingual-e5-small"), "source");
+        PrintBlank();
+
+        // ── JavaScript libraries ──
+        Print("● JavaScript ライブラリ", "heading");
+        Print("  @huggingface/transformers 4.2.0 — Apache-2.0", "dim");
+        Print("  onnxruntime-web (transformers.js 同梱) — MIT", "dim");
+        Print("  @ladybugdb/wasm-core 0.17.1 — MIT", "dim");
+        PrintBlank();
+
+        // ── NuGet packages ──
+        Print("● NuGet パッケージ", "heading");
+        Print("  Markdig 0.37.0 — BSD-2-Clause", "dim");
+        Print("  Microsoft.AspNetCore.Components.WebAssembly 10.0.9 — MIT", "dim");
+        PrintBlank();
+
+        Print("詳細・全文一覧: " + Link("licenses/THIRD-PARTY-NOTICES.md", "licenses/THIRD-PARTY-NOTICES.md"), "info");
     }
 
     private void PrintSources(IReadOnlyList<ChunkResult>? sources)
