@@ -5,6 +5,15 @@ using AzureMoe.Chat.Ingest;
 using Microsoft.Extensions.Configuration;
 
 // ---------------------------------------------------------------------------
+// `inspect` subcommand — read-only diagnostics over a built .lbdb.
+//   dotnet run --project src/AzureMoe.Chat.Ingest -- inspect [dbPath]
+//   ... inspect <dbPath> --cypher "MATCH (n) RETURN count(n)"
+//   ... inspect <dbPath> --query "2026年2月のAzure Functionsの更新" [--model <dir>] [--topk 8]
+// ---------------------------------------------------------------------------
+if (args.Length > 0 && args[0].Equals("inspect", StringComparison.OrdinalIgnoreCase))
+    return RunInspect(args[1..]);
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 var config = new ConfigurationBuilder()
@@ -92,10 +101,15 @@ try
     Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、モデル: {opt.ModelDir})...");
     using var embedder = new E5Embedder(opt.ModelDir);
 
+    // Prepend the post title so each chunk's vector carries the article's identity
+    // (topic/date). Improves relevance for "what was posted about X" style queries.
+    var titleById = posts.ToDictionary(p => p.Id, p => p.Title);
     for (var i = 0; i < chunks.Count; i++)
     {
         cts.Token.ThrowIfCancellationRequested();
-        chunks[i].Embedding = embedder.EmbedPassage(chunks[i].Text);
+        var title = titleById.GetValueOrDefault(chunks[i].PostId, "");
+        var embedInput = string.IsNullOrEmpty(title) ? chunks[i].Text : $"{title}\n\n{chunks[i].Text}";
+        chunks[i].Embedding = embedder.EmbedPassage(embedInput);
         if ((i + 1) % 20 == 0 || i == chunks.Count - 1)
             Console.Write($"\r  [{i + 1}/{chunks.Count}]  dim={embedder.Dimension}  ");
     }
@@ -206,4 +220,61 @@ catch (Exception ex)
     Console.Error.WriteLine();
     Console.Error.WriteLine(ex.ToString());
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// inspect subcommand implementation
+// ---------------------------------------------------------------------------
+static int RunInspect(string[] rest)
+{
+    string? Flag(string name)
+    {
+        var i = Array.FindIndex(rest, a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
+        return i >= 0 && i + 1 < rest.Length ? rest[i + 1] : null;
+    }
+
+    // First non-flag arg is the DB path; otherwise auto-pick newest .lbdb.
+    var dbPath = rest.FirstOrDefault(a => !a.StartsWith('-')) ?? FindNewestDb();
+    if (dbPath is null)
+    {
+        Console.Error.WriteLine("DB ファイルを指定してください (例: inspect out/blog-YYYYMMDD.lbdb)。");
+        return 1;
+    }
+
+    Console.WriteLine($"DB: {Path.GetFullPath(dbPath)}");
+    Console.WriteLine();
+
+    try
+    {
+        using var inspector = new GraphInspector(dbPath);
+
+        if (Flag("--cypher") is { } cypher)
+            inspector.RunCypher(cypher);
+        else if (Flag("--query") is { } query)
+            inspector.SampleVectorSearch(
+                query,
+                Flag("--model") ?? "model/Xenova/multilingual-e5-small",
+                int.TryParse(Flag("--topk"), out var k) ? k : 8);
+        else
+            inspector.PrintStats();
+
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"エラー: {ex.Message}");
+        return 1;
+    }
+
+    static string? FindNewestDb()
+    {
+        foreach (var dir in new[] { "out", "src/AzureMoe.Chat.Web/wwwroot/data" })
+        {
+            if (!Directory.Exists(dir)) continue;
+            var newest = Directory.GetFiles(dir, "*.lbdb")
+                .OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
+            if (newest is not null) return newest;
+        }
+        return null;
+    }
 }

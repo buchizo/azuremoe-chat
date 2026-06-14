@@ -101,6 +101,13 @@ async function restartOnWasm() {
   });
 }
 
+// Emergency stop: tell the worker to abort the in-progress generation. The
+// worker checks this between tokens and throws to unwind generate(). Safe to
+// call when nothing is running (the flag is reset at the next generate).
+export function interruptLlm() {
+  try { worker?.postMessage({ id: 0, type: "interrupt" }); } catch { }
+}
+
 // Stream a chat turn. Returns { fullText } when generation is complete.
 // If the GPU backend dies, transparently restart on WASM and retry once.
 export async function chat(messagesJson, maxNewTokens, dotnetRef) {
@@ -112,6 +119,8 @@ export async function chat(messagesJson, maxNewTokens, dotnetRef) {
   try {
     return await run();
   } catch (e) {
+    // User-requested stop → resolve quietly; the C# side has already cancelled.
+    if (String(e?.message ?? "").includes("__INTERRUPTED__")) return { fullText: "" };
     // Already on WASM, or not a recoverable GPU failure → surface it.
     if (_forcedWasm || !isGpuLost(e.message)) throw e;
 

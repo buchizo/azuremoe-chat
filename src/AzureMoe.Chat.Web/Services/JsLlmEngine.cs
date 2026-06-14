@@ -75,7 +75,21 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         IEnumerable<ChatMessage> messages,
         Func<string, ValueTask> onToken,
         Action<string>? onCompleted = null,
+        int? maxNewTokens = null,
         CancellationToken ct = default)
+    {
+        var fullText = await RunAsync(messages, maxNewTokens ?? _cfg.LlmMaxNewTokens, onToken, ct);
+        onCompleted?.Invoke(fullText);
+    }
+
+    public ValueTask<string> CompleteAsync(
+        IEnumerable<ChatMessage> messages, int maxNewTokens, CancellationToken ct = default)
+        // No UI streaming — swallow the token deltas and return the full text.
+        => RunAsync(messages, maxNewTokens, _ => ValueTask.CompletedTask, ct);
+
+    private async ValueTask<string> RunAsync(
+        IEnumerable<ChatMessage> messages, int maxNewTokens,
+        Func<string, ValueTask> onToken, CancellationToken ct)
     {
         if (!IsLoaded) throw new InvalidOperationException("LLM not loaded — call LoadAsync first");
 
@@ -85,16 +99,26 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         var messagesJson = JsonSerializer.Serialize(
             messages.Select(m => new { role = m.Role, content = m.Content }));
 
-        var m2 = await GetModuleAsync();
-        // Returns { fullText } after all tokens have been streamed.
-        var result = await m2.InvokeAsync<JsonElement>(
-            "chat", ct, messagesJson, _cfg.LlmMaxNewTokens, _chatRef);
+        try
+        {
+            var m2 = await GetModuleAsync();
+            // Returns { fullText } after all tokens have been streamed.
+            var result = await m2.InvokeAsync<JsonElement>(
+                "chat", ct, messagesJson, maxNewTokens, _chatRef);
+            return result.TryGetProperty("fullText", out var ft) ? ft.GetString() ?? "" : "";
+        }
+        finally
+        {
+            _chatRef?.Dispose();
+            _chatRef = null;
+        }
+    }
 
-        _chatRef?.Dispose();
-        _chatRef = null;
-
-        var fullText = result.TryGetProperty("fullText", out var ft) ? ft.GetString() ?? "" : "";
-        onCompleted?.Invoke(fullText);
+    /// <summary>Tell the JS worker to abort the in-progress generation.</summary>
+    public async ValueTask InterruptAsync()
+    {
+        if (_module is null) return;
+        try { await _module.InvokeVoidAsync("interruptLlm"); } catch { }
     }
 
     /// <summary>

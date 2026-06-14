@@ -38,6 +38,12 @@ let activeDevice = "wasm";
 let loadedModelId = null;
 let loadedDtype   = "q4";
 
+// Set by an "interrupt" message; checked each streamed token to abort the
+// current generation (emergency stop). Sentinel used so the main thread can
+// tell a user stop apart from a real error.
+let interrupted = false;
+const INTERRUPT_SENTINEL = "__INTERRUPTED__";
+
 async function detectDevice() {
   if (!ENABLE_WEBGPU) return "wasm";
   if (typeof navigator === "undefined" || !navigator.gpu) return "wasm";
@@ -108,6 +114,12 @@ async function tryPipeline(modelId, opts) {
 
 
 self.onmessage = async ({ data: { id, type, payload } }) => {
+  // ── interrupt ───────────────────────────────────────────────────────────
+  // Out-of-band stop signal. Processed between token generations (the async
+  // generation loop yields to the event loop), so the next streamed token
+  // aborts the run. No response is sent.
+  if (type === "interrupt") { interrupted = true; return; }
+
   try {
     // ── load ──────────────────────────────────────────────────────────────
     if (type === "load") {
@@ -198,6 +210,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       if (!useBuiltinAI && !pipe) throw new Error("Model not loaded — call 'load' first");
       const { messages, maxNewTokens = 1024 } = payload;
       let fullText = "";
+      interrupted = false;   // fresh run
 
       if (useBuiltinAI) {
         const llmApi    = getLanguageModelAPI();
@@ -214,6 +227,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
           const stream = session.promptStreaming(lastUser?.content ?? "");
           let prev = "";
           for await (const chunk of stream) {
+            if (interrupted) throw new Error(INTERRUPT_SENTINEL);
             const delta = chunk.slice(prev.length);
             prev = chunk;
             if (delta) {
@@ -232,6 +246,9 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
           callback_function: (chunk) => {
             fullText += chunk;
             self.postMessage({ id, type: "token", payload: { token: chunk } });
+            // Throwing here aborts the in-progress generate() — this is how the
+            // emergency stop halts the model mid-run.
+            if (interrupted) throw new Error(INTERRUPT_SENTINEL);
           },
         });
         // Run inference. If the WebGPU backend dies here (Invalid Buffer /
@@ -241,8 +258,15 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         // which terminates this worker and reloads on WASM in a fresh one.
         await pipe(messages, {
           max_new_tokens: maxNewTokens,
-          do_sample: false,
-          repetition_penalty: 1.1,
+          // Light sampling instead of greedy decoding. Greedy on a small (1.2B)
+          // model degenerates into repeated words / runaway bullet lists; mild
+          // sampling + a repetition penalty keeps output coherent and natural.
+          do_sample: true,
+          temperature: 0.4,
+          top_p: 0.9,
+          top_k: 40,
+          repetition_penalty: 1.2,
+          no_repeat_ngram_size: 3,
           streamer,
           return_full_text: false,
         });

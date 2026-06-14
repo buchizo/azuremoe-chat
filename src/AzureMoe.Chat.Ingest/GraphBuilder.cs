@@ -52,19 +52,30 @@ public sealed class GraphBuilder : IDisposable
 
         // --- posts ----------------------------------------------------------
         log($"Post ノード挿入 ({posts.Count} 件)...");
+        var postById = posts.ToDictionary(p => p.Id);
         Exec("BEGIN TRANSACTION");
         foreach (var p in posts)
-            Exec($"CREATE (:Post {{id: {p.Id}, title: '{Esc(p.Title)}', url: '{Esc(p.Url)}', date: '{Esc(p.Date)}'}})");
+        {
+            var (py, pm) = GraphSchema.ParseYearMonth(p.Date);
+            Exec($"CREATE (:Post {{id: {p.Id}, title: '{Esc(p.Title)}', url: '{Esc(p.Url)}', " +
+                 $"date: '{Esc(p.Date)}', year: {py}, month: {pm}}})");
+        }
         Exec("COMMIT");
 
         // --- chunks (with embeddings) ---------------------------------------
+        // Post date/title/year/month are denormalised onto each chunk for fast
+        // chunk-level date filtering and citation display without a join.
         log($"Chunk ノード挿入 ({chunks.Count} 件)...");
         Exec("BEGIN TRANSACTION");
         foreach (var c in chunks)
         {
             var emb = c.Embedding ?? throw new InvalidOperationException($"Chunk {c.Id} has no embedding.");
+            postById.TryGetValue(c.PostId, out var post);
+            var date = post?.Date ?? "";
+            var (cy, cm) = GraphSchema.ParseYearMonth(date);
             Exec($"CREATE (:Chunk {{id: {c.Id}, postId: {c.PostId}, ordinal: {c.Ordinal}, " +
-                 $"text: '{Esc(c.Text)}', emb: {CypherFloatArray(emb)}}})");
+                 $"text: '{Esc(c.Text)}', date: '{Esc(date)}', title: '{Esc(post?.Title ?? "")}', " +
+                 $"year: {cy}, month: {cm}, emb: {CypherFloatArray(emb)}}})");
         }
         Exec("COMMIT");
 

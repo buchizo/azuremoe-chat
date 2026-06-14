@@ -21,8 +21,12 @@ builder.Services.AddScoped<AssetLoader>();
 builder.Services.AddScoped<JsGraphStore>();
 builder.Services.AddScoped<JsEmbedder>();
 builder.Services.AddScoped<JsLlmEngine>();
+builder.Services.AddSingleton<QueryAnalyzer>();
+builder.Services.AddScoped<RetrievalEngine>(sp => new RetrievalEngine(
+    sp.GetRequiredService<JsGraphStore>()));
 builder.Services.AddScoped<RagPipeline>(sp => new RagPipeline(
-    sp.GetRequiredService<JsGraphStore>(),
+    sp.GetRequiredService<RetrievalEngine>(),
+    sp.GetRequiredService<QueryAnalyzer>(),
     sp.GetRequiredService<JsEmbedder>(),
     sp.GetRequiredService<JsLlmEngine>(),
     sp.GetRequiredService<AppConfig>()));

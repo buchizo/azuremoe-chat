@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Xml.Linq;
 using AzureMoe.Chat.Core;
 
@@ -197,9 +198,28 @@ public static class WordPressXmlReader
 
     private static string NormalizeDate(string raw)
     {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        raw = raw.Trim();
+
         // "2025-01-01 09:00:00" → "2025-01-01T09:00:00Z"
         if (raw.Length == 19 && raw[10] == ' ')
             return raw[..10] + "T" + raw[11..] + "Z";
+
+        // Already ISO with 'T': keep, but append 'Z' when no timezone is present.
+        if (raw.Length >= 19 && raw[10] == 'T')
+        {
+            var hasTz = raw.EndsWith('Z') || raw.Contains('+') || raw.LastIndexOf('-') > 10;
+            return hasTz ? raw : raw + "Z";
+        }
+
+        // Date only "2025-01-01"
+        if (raw.Length == 10 && raw[4] == '-' && raw[7] == '-')
+            return raw + "T00:00:00Z";
+
+        // Anything else: parse and normalise to UTC ISO-8601.
+        if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dto))
+            return dto.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
+
         return raw;
     }
 }

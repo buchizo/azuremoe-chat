@@ -12,5 +12,13 @@ public interface ILlmEngine
         IProgress<(string Text, int Pct)>? progress = null, CancellationToken ct = default);
 
     ValueTask ChatAsync(IEnumerable<ChatMessage> messages, Func<string, ValueTask> onToken,
-        Action<string>? onCompleted = null, CancellationToken ct = default);
+        Action<string>? onCompleted = null, int? maxNewTokens = null, CancellationToken ct = default);
+
+    /// <summary>Run the model and return the full text, without streaming to the UI.
+    /// Used for short auxiliary steps (query rewrite, sufficiency evaluation).</summary>
+    ValueTask<string> CompleteAsync(IEnumerable<ChatMessage> messages, int maxNewTokens,
+        CancellationToken ct = default);
+
+    /// <summary>Signal the worker to abort the current generation (emergency stop).</summary>
+    ValueTask InterruptAsync();
 }

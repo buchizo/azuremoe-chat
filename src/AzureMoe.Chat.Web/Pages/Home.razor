@@ -39,6 +39,10 @@ else
         {
             <div class="line ai-stream">@((MarkupString)RenderMarkdown(_streamBuf.ToString()))</div>
         }
+        @if (_busy && _streamBuf.Length == 0 && _thinking is not null)
+        {
+            <div class="line thinking"><span class="spinner"></span>@_thinking</div>
+        }
     </div>
 
     @if (_ready)
@@ -54,6 +58,10 @@ else
                    placeholder="@(_busy ? "応答中..." : "質問を入力して Enter")"
                    autocomplete="off"
                    spellcheck="false" />
+            @if (_busy)
+            {
+                <button class="stop-btn" @onclick="StopAsync" title="生成を停止 (緊急停止)">■ 停止</button>
+            }
         </div>
     }
     <footer class="app-footer terminal-footer">
@@ -75,6 +83,7 @@ else
     private bool   _accepted  = false;
     private bool   _ready     = false;
     private bool   _busy      = false;
+    private string? _thinking = null;   // transient "processing" status during a turn
     private ElementReference _terminalRef;
     private ElementReference _outputRef;
     private ElementReference _inputRef;
@@ -155,6 +164,8 @@ else
             else
                 Print($"LLM: {Cfg.LlmModelId} ({Cfg.LlmDtype})  初回クエリ時に自動ダウンロード", "info");
 
+            Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}  (/mode で変更)", "info");
+
             PrintBlank();
             PrintHelp();
             PrintBlank();
@@ -182,6 +193,17 @@ else
         await HandleInputAsync(input);
     }
 
+    // Emergency stop: cancel the .NET pipeline (aborts the awaited LLM call) and
+    // signal the worker to halt generation immediately.
+    private async Task StopAsync()
+    {
+        if (!_busy) return;
+        _thinking = "停止しています…";
+        StateHasChanged();
+        try { await LlmEngine.InterruptAsync(); } catch { }
+        if (!_cts.IsCancellationRequested) await _cts.CancelAsync();
+    }
+
     private async Task HandleInputAsync(string input)
     {
         PrintBlank();
@@ -197,6 +219,9 @@ else
 
         // RAG query
         _busy = true;
+        // Fresh cancellation source per turn so the Stop button works repeatedly.
+        _cts.Dispose();
+        _cts = new CancellationTokenSource();
         StateHasChanged();
         try
         {
@@ -220,12 +245,15 @@ else
             {
                 IReadOnlyList<ChunkResult>? sources = null;
                 _streamBuf.Clear();
+                _thinking = "考えています…";
                 StateHasChanged();
 
                 sources = await Rag.RunAsync(
                     input, _history,
                     onToken: async delta =>
                     {
+                        // First token arrived — replace the "thinking" indicator with the stream.
+                        _thinking = null;
                         // _streamBuf holds raw text — Blazor's @ binding auto-escapes it.
                         _streamBuf.Append(delta);
                         StateHasChanged();
@@ -240,18 +268,47 @@ else
                         _history.Add(new ChatMessage("assistant", full));
                         if (_history.Count > 20) _history.RemoveRange(0, 2);
                     },
+                    onStatus: msg =>
+                    {
+                        // Show what the pipeline is doing (analysing / searching / generating).
+                        _thinking = msg;
+                        StateHasChanged();
+                    },
+                    onWarning: msg =>
+                    {
+                        // Grounding check flagged the answer as not fully supported.
+                        Print(EscapeHtml(msg), "warn");
+                        StateHasChanged();
+                    },
+                    onStreamReset: () =>
+                    {
+                        // Drop the previous (un-grounded) preview before regenerating.
+                        _streamBuf.Clear();
+                        StateHasChanged();
+                    },
                     ct: _cts.Token);
 
+                _thinking = null;
                 StateHasChanged();
                 PrintBlank();
                 PrintSources(sources);
             }
         }
-        catch (OperationCanceledException) { Print("キャンセルされました", "warn"); }
+        catch (OperationCanceledException)
+        {
+            // Keep whatever was generated before the stop, then note the cancel.
+            if (_streamBuf.Length > 0)
+            {
+                Print(RenderMarkdown(_streamBuf.ToString()), "ai");
+                _streamBuf.Clear();
+            }
+            Print("⏹ 停止しました", "warn");
+        }
         catch (Exception ex) { Print($"エラー: {EscapeHtml(ex.Message)}", "error"); }
         finally
         {
             _busy = false;
+            _thinking = null;
             StateHasChanged();
             await FocusInputAsync();
         }
@@ -259,10 +316,17 @@ else
 
     private async Task HandleCommandAsync(string cmd)
     {
-        switch (cmd)
+        var parts = cmd.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var verb  = parts.Length > 0 ? parts[0] : "";
+        var arg   = parts.Length > 1 ? parts[1] : "";
+
+        switch (verb)
         {
             case "help":
                 PrintHelp();
+                break;
+            case "mode":
+                SetMode(arg);
                 break;
             case "clear":
                 _lines.Clear();
@@ -290,6 +354,7 @@ else
                     Print($"LLM     : {Cfg.LlmModelId} ({Cfg.LlmDtype})  {llmStatus}", "info");
                 }
                 Print($"埋め込み: {Cfg.EmbeddingModelId}", "info");
+                Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
                 break;
             case "reload":
                 _lines.Clear();
@@ -326,12 +391,40 @@ else
     {
         Print("コマンド:", "heading");
         Print("  /help     — このヘルプを表示", "dim");
+        Print("  /mode [fast|normal|deep] — 探索の深さを表示/変更", "dim");
         Print("  /model    — 現在のモデル情報", "dim");
         Print("  /history  — 会話履歴の件数", "dim");
         Print("  /license  — ライセンス情報を表示", "dim");
         Print("  /clear    — 画面と会話履歴をクリア", "dim");
         Print("  /reload   — 再起動", "dim");
         Print("それ以外は RAG クエリとして実行されます", "dim");
+    }
+
+    private static string ModeLabel(RetrievalMode m) => m switch
+    {
+        RetrievalMode.Fast   => "Fast (高速・LLM1回)",
+        RetrievalMode.Deep   => "Deep (高精度・LLM多用)",
+        _                    => "Normal (バランス・LLM2回)",
+    };
+
+    private void SetMode(string arg)
+    {
+        if (string.IsNullOrWhiteSpace(arg))
+        {
+            Print($"現在の探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
+            Print("変更: /mode fast | /mode normal | /mode deep", "dim");
+            return;
+        }
+
+        if (Enum.TryParse<RetrievalMode>(arg, ignoreCase: true, out var mode))
+        {
+            Cfg.RetrievalMode = mode;
+            Print($"探索モードを {ModeLabel(mode)} に変更しました。", "ok");
+        }
+        else
+        {
+            Print($"不明なモード: {EscapeHtml(arg)}  (fast / normal / deep のいずれか)", "warn");
+        }
     }
 
     // Link helper — href is always a trusted literal we author below.

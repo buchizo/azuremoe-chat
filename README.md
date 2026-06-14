@@ -194,6 +194,45 @@ out/
 └── manifest.json         メタデータ (モデル情報・件数・SHA-256)
 ```
 
+> **グラフ探索を使うには `--NoLlm` を付けずに実行する。**
+> `--NoLlm` だと `Entity` / `AzureService` ノードと `MENTIONS` / `RELATED_TO` /
+> `COVERS_SERVICE` エッジが作られず、グラフは `Post` / `Chunk` / `Tag` のみになる。
+> チャットアプリの**エンティティ/サービスを辿った関連付け**にはこれらが必要なので、
+> 本番の DB は OpenAI 互換 LLM を立てて (`--NoLlm` なしで) ビルドすること。
+> なお埋め込みは記事タイトルを前置して生成され、各 `Chunk` には所属 `Post` の
+> 日付・タイトル・年・月が非正規化保存される (チャンク単位の日付フィルタ用)。
+
+### 診断・検証サブコマンド (`inspect`)
+
+構築済み `.lbdb` を**読み取り専用**で開き、データが期待通りかを検証する。
+「2026年2月の話題」のような時期クエリで的外れな結果が返る場合の原因切り分けに使う。
+
+```bash
+# 1. 統計サマリ: ノード/エッジ件数・日付分布(月別)・次数上位のエンティティ/サービス・サンプル Chunk
+dotnet run --project src/AzureMoe.Chat.Ingest -- inspect
+
+# DB を明示指定 (省略時は out/ → wwwroot/data/ の順に最新 .lbdb を自動検出)
+dotnet run --project src/AzureMoe.Chat.Ingest -- inspect out/blog-20260614.lbdb
+
+# 2. 任意の Cypher を実行 (結果をテーブル表示)
+dotnet run --project src/AzureMoe.Chat.Ingest -- inspect --cypher \
+  "MATCH (p:Post) WHERE p.date >= '2026-02-01' AND p.date < '2026-03-01' RETURN count(p)"
+
+# 3. 自然文クエリでサンプルベクトル検索 (埋め込みモデルが必要・期待した記事が返るか確認)
+dotnet run --project src/AzureMoe.Chat.Ingest -- inspect --query "2026年2月のAzure Functionsの更新" --topk 8
+```
+
+| 引数 | デフォルト | 説明 |
+|---|---|---|
+| (位置引数) | (自動検出) | 対象 `.lbdb` ファイルパス |
+| `--cypher "..."` | — | 任意の Cypher を実行して結果を表示 |
+| `--query "..."` | — | 自然文を埋め込んでベクトル検索 (上位 `--topk` 件) |
+| `--model` | `model/Xenova/multilingual-e5-small` | `--query` 用 ONNX モデルのディレクトリ |
+| `--topk` | `8` | `--query` で返す件数 |
+
+> 引数なし (`inspect`) の統計表示で `Entity` / `AzureService` が **0 件**なら、その DB は
+> `--NoLlm` でビルドされている。グラフ探索を使いたい場合は再ビルドが必要。
+
 ---
 
 ## 検索確認ツール (AzureMoe.Chat.Verify)
@@ -343,11 +382,44 @@ dotnet run --project src/AzureMoe.Chat.Web
 | `DbBaseUrl` | `data/` | DB ファイルのベース URL (manifest の `databaseFile` を結合) |
 | `LlmModelId` | `onnx-community/Qwen2.5-0.5B-Instruct` | LLM モデル ID (HuggingFace) |
 | `LlmDtype` | `q4` | 量子化精度。`q4` / `q8` / `fp16` など |
-| `LlmMaxNewTokens` | `1024` | 1 回の生成の最大トークン数 |
+| `LlmMaxNewTokens` | `4096` | 最終回答の最大生成トークン数 (上限。EOS で自然停止。発散時の暴走を抑えるため上限を設定) |
+| `LlmRewriteMaxTokens` | `512` | クエリ書き換え (Normal/Deep) の最大トークン数 |
+| `LlmEvalMaxTokens` | `512` | 充足判定 (Deep) の最大トークン数 |
 | `EmbeddingModelId` | `Xenova/multilingual-e5-small` | 埋め込みモデル ID (HuggingFace) |
-| `RagTopK` | `5` | ベクトル検索で取得するチャンク数 |
+| `RetrievalMode` | `Normal` | 探索の深さ。`Fast` / `Normal` / `Deep` (UI の `/mode` でも変更可) |
+| `RagTopK` | `6` | 最終参照数の基準値 (モード別に増減。再ランク＋足切り後の上限) |
 | `MaxContextChars` | `6000` | LLM に渡す文脈の最大文字数 |
-| `SystemPrompt` | (組み込み) | システムプロンプト |
+| `HistoryTurns` | `3` | LLM に渡す直近会話ターン数 (履歴に引っ張られないよう小さめ) |
+| `DeepMaxRounds` | `3` | Deep モードの検索クエリ数 (round-0 ＋ 上位タイトルでの追検索) |
+| `VerifyGrounding` | `true` | 全モードで、生成後に「回答が参考情報で裏付けられるか」を検査し、不十分なら警告を表示 (短い LLM 呼び出しを1回追加) |
+| `SystemPrompt` | (組み込み) | システムプロンプト (キャラ付け + GraphRAG ルール) |
+
+#### 探索モード (`RetrievalMode`)
+
+検索の深さと応答速度のトレードオフを選べる。UI の `/mode` で実行中にも切替可能。
+
+| モード | 検索の広さ | 内容 | 体感 |
+|---|---|---|---|
+| `Fast` | 狭 | グラフ探索なしの純ベクトル検索 | 最軽量 |
+| `Normal` | 中 | グラフ探索あり・履歴を踏まえたクエリ書き換え | バランス (既定) |
+| `Deep` | 広 | 関連エンティティまで辿る + 上位記事タイトルで決定的に追検索 (複数クエリ, 最大 `DeepMaxRounds`) | 高精度・低速 |
+
+**全モード共通の2段構え**:
+1. *recall* — モードに応じてベクトル＋グラフ＋日付で候補を広く集める。
+2. *precision* — 候補を**「元の質問」へのコサイン類似度で再ランクし、質問の関連プール (上位) から外れたものを足切り**する。
+   グラフのつながり (共有タグ/エンティティ/サービス) は同点時の微加点に留め、的外れな拡張が本筋の記事を上回らないようにする。
+   これにより Deep でも「件数は多いが質問に合わない」を防ぐ。
+
+質問から日付 (例: 「2026年2月」「先月」) を検出した場合は、再ランクも日付窓の中で行い**範囲外の記事を除外**する。
+
+> **応答時間について**: ブラウザ内 CPU では最終回答の生成時間が支配的で、これは全モード共通。
+> そのため Fast と Normal の体感差は小さく (主に検索の広さと精度で差が出る)、
+> 複数クエリを投げる **Deep が明確に遅い**。各ステップの進行状況はチャット画面に表示される。
+
+**接地 (グラウンディング) の担保**: LLM が学習知識で一般論を返さないよう、全モードで次を行う。
+- 関連する参考情報が1件も見つからない場合は生成を行わず、「見つからなかった」旨を返す (`VerifyGrounding` とは独立に常時)。
+- 生成後に `VerifyGrounding`=true なら、回答が参考情報で裏付けられるかを検査する。裏付け不足と判定された場合は、**より厳密なプロンプト（参考情報のみ・[n] 引用必須）で1回だけ再生成**し、それでも裏付けられなければ回答の下に⚠警告を表示する。
+- 検索結果は「元の質問」への関連度で再ランク・足切りされるため、文脈には質問に合致した参照のみが渡る（precision 重視）。
 
 ### UI コマンド
 
@@ -356,16 +428,21 @@ dotnet run --project src/AzureMoe.Chat.Web
 | コマンド | 動作 |
 |---|---|
 | `/help` | コマンド一覧を表示 |
-| `/model` | 現在のモデル情報を表示 |
+| `/mode [fast\|normal\|deep]` | 探索モードを表示 / 変更 (引数なしで現在値を表示) |
+| `/model` | 現在のモデル情報を表示 (探索モードも表示) |
 | `/history` | 会話履歴の件数を表示 |
 | `/clear` | 画面と会話履歴をクリア |
 | `/reload` | アプリを再起動 |
 | (それ以外) | RAG クエリとして実行 |
 
+応答生成中は入力欄の右に **「■ 停止」ボタン**が表示され、クリックすると LLM の生成を即座に中断する
+(緊急停止)。途中まで生成された回答は残る。長い生成 (`LlmMaxNewTokens` が大きい) や、まれに小型モデルが
+同じ文言を繰り返すループに入った場合の保険として使える (ループ自体は `no_repeat_ngram_size` で抑制済み)。
+
 ### 動作フロー
 
 1. 起動時: manifest.json 取得 → DB ダウンロード → LadybugDB WASM 初期化 → transformers.js モデル読み込み
-2. 質問入力時: クエリ埋め込み → ベクトル検索 → コンテキスト構築 → WebLLM でストリーミング生成
-3. WebGPU 非対応環境: LLM 生成をスキップし、検索結果のみ表示
+2. 質問入力時 (モードにより広さが変わる): クエリ解析 (日付・キーワード抽出) → ベクトル＋グラフ＋日付で候補を収集 → **元の質問への関連度で再ランク・足切り** → URL 単位でまとめてコンテキスト構築 → WebLLM でストリーミング生成 → 接地検査
+3. WebGPU 非対応環境: WASM CPU にフォールバックして生成 (低速)
 
 
