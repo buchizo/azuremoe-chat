@@ -37,6 +37,19 @@ public sealed class JsEmbedder : IEmbedder, IAsyncDisposable
         return await m.InvokeAsync<float[]>("embedQuery", ct, text);
     }
 
+    /// <summary>
+    /// Release the loaded embedding pipeline. After this, IsLoaded is false and
+    /// the next LoadAsync recreates it. Used by /reload.
+    /// </summary>
+    public async ValueTask UnloadAsync(CancellationToken ct = default)
+    {
+        if (_module is not null)
+        {
+            try { await _module.InvokeVoidAsync("disposeEmbeddingModel", ct); } catch { }
+        }
+        _loaded = false;
+    }
+
     [JSInvokable]
     public void OnEmbedProgress(string file, int pct) => _progress?.Report((file, pct));
 

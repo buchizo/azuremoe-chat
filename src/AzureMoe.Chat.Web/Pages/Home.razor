@@ -261,6 +261,11 @@
             case "reload":
                 _lines.Clear();
                 _history.Clear();
+                // Unload loaded models first so reload truly starts fresh,
+                // rather than re-using the already-loaded LLM/embedding worker.
+                _ready = false;
+                await LlmEngine.UnloadAsync(_cts.Token);
+                await Embedder.UnloadAsync(_cts.Token);
                 await RunStartupAsync();
                 return;
             default:

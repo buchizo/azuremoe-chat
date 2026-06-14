@@ -22,6 +22,14 @@ export async function loadEmbeddingModel(modelId, dotnetRef) {
   return true;
 }
 
+// Release the loaded embedding pipeline (and its tensors), so the next
+// loadEmbeddingModel() recreates it from scratch. Used by /reload.
+export async function disposeEmbeddingModel() {
+  try { await extractor?.dispose?.(); } catch { }
+  extractor = null;
+  _modelId  = null;
+}
+
 // Embed text with the e5 "query: " prefix. Returns Float32Array.
 export async function embedQuery(text) {
   if (!extractor) throw new Error("Embedding model not loaded");

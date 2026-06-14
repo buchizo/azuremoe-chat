@@ -97,6 +97,21 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         onCompleted?.Invoke(fullText);
     }
 
+    /// <summary>
+    /// Terminate the worker and free the loaded model. After this, IsLoaded is
+    /// false and the next ChatAsync will reload from scratch. Used by /reload.
+    /// </summary>
+    public async ValueTask UnloadAsync(CancellationToken ct = default)
+    {
+        if (_module is not null)
+        {
+            try { await _module.InvokeVoidAsync("disposeLlmWorker", ct); } catch { }
+        }
+        _chatRef?.Dispose();
+        _chatRef = null;
+        Device   = null;   // IsLoaded → false
+    }
+
     [JSInvokable]
     public void OnLlmProgress(string text, int pct) => _loadProgress?.Report((text, pct));
 

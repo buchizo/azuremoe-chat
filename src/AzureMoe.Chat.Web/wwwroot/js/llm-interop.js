@@ -69,6 +69,15 @@ export function createLlmWorker(workerUrl) {
   spawnWorker();
 }
 
+// Fully tear down the worker (and its loaded model) and reset state, so the
+// next loadLlmModel() starts from scratch. Used by /reload.
+export function disposeLlmWorker() {
+  if (worker) { try { worker.terminate(); } catch { } worker = null; }
+  handlers.clear();
+  _lastLoad   = null;
+  _forcedWasm = false;
+}
+
 // Load a model. Returns { device: "webgpu" | "wasm" | "built-in" } on success.
 export async function loadLlmModel(modelId, dtype, dotnetRef) {
   _lastLoad = { modelId, dtype, dotnetRef };
