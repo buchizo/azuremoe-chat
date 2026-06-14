@@ -11,7 +11,14 @@ public sealed class AppConfig
     // Recommended options:
     //   "onnx-community/Qwen2.5-0.5B-Instruct"  — ~350 MB q4, very fast
     //   "onnx-community/Qwen2.5-1.5B-Instruct"  — ~900 MB q4, better quality
-    public string LlmModelId      { get; set; } = "onnx-community/Qwen3.5-0.8B-ONNX-OPT";
+    // Standard single-file text model (Qwen2ForCausalLM) — the canonical
+    // transformers.js demo model. Runs reliably on CPU/WASM (and WebGPU).
+    // The previous "Qwen3.5-0.8B-ONNX-OPT" was a 256K-context VL model whose
+    // unusual architecture overflowed ONNX Runtime's size calc on every backend.
+    public string LlmModelId      { get; set; } = "onnx-community/Qwen2.5-0.5B-Instruct";
+    // Decoder dtype. Running CPU (WASM) only — "q4" (4-bit weights, fp32
+    // compute) is the best fit for CPU. The worker derives a matching
+    // embed_tokens precision in buildDtype() (fp32 here) to avoid overflow.
     public string LlmDtype        { get; set; } = "q4";
     public int    LlmMaxNewTokens { get; set; } = 1024;
 

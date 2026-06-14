@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AzureMoe Chat</title>
   <base href="/" />
+  <!-- Enables cross-origin isolation (SharedArrayBuffer) so ONNX Runtime Web can
+       run multi-threaded WASM. Must load before Blazor; on first visit it
+       registers a service worker and reloads once to take control. -->
+  <script src="coi-serviceworker.js"></script>
   <link rel="stylesheet" href="css/app.css" />
   <link href="AzureMoe.Chat.Web.styles.css" rel="stylesheet" />
   <script type="importmap"></script>

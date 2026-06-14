@@ -3,7 +3,34 @@
 //           2) transformers.js on WebGPU
 //           3) transformers.js on WASM CPU
 // transformers.js v4+ required — Qwen3.5 (qwen3_5) support was added in v4.
-import { pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4";
+// Pinned to an exact version (not the floating @4 range) so esm.sh always
+// resolves the same build — 4.2.0 is the current latest. NOTE: the WebGPU
+// "Invalid Buffer / mapAsync" crash on repeated generation lives in v4's
+// native (C++) WebGPU runtime and is not fixed in any 4.x release, so a
+// version bump alone will not resolve it; we mitigate via the WASM fallback
+// and by keeping GPU buffers small (trimmed history + bounded max tokens).
+import { env, pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4.2.0";
+
+// Multi-threaded WASM needs SharedArrayBuffer, which requires cross-origin
+// isolation (provided by coi-serviceworker.js). When isolated, use most of the
+// CPU cores; otherwise ORT falls back to single-threaded (much slower).
+if (self.crossOriginIsolated) {
+  const cores = (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
+  env.backends.onnx.wasm.numThreads = Math.max(1, Math.min(cores - 1, 8));
+} else {
+  env.backends.onnx.wasm.numThreads = 1;
+}
+
+// WebGPU is disabled: this machine's WebGPU (Dawn/GPU driver) fails with a
+// different low-level error for every dtype (Invalid Buffer, unaligned access,
+// memory access out of bounds) — a driver-level problem, not a model/code one.
+// Running CPU (WASM) only. Re-enable (true) only after the GPU driver/browser
+// is fixed; the worker-restart WASM fallback in llm-interop.js still covers it.
+const ENABLE_WEBGPU = false;
+
+// Chrome's built-in Gemini Nano is a DIFFERENT model than the configured one.
+// Disabled so the configured LLM is always what runs.
+const ENABLE_BUILTIN_AI = false;
 
 let pipe         = null;
 let useBuiltinAI = false;
@@ -12,6 +39,7 @@ let loadedModelId = null;
 let loadedDtype   = "q4";
 
 async function detectDevice() {
+  if (!ENABLE_WEBGPU) return "wasm";
   if (typeof navigator === "undefined" || !navigator.gpu) return "wasm";
   try {
     const adapter = await navigator.gpu.requestAdapter();
@@ -78,43 +106,20 @@ async function tryPipeline(modelId, opts) {
   }
 }
 
-// Load pipeline on WASM trying dtypes in order until one works.
-// Returns the loaded pipeline; throws if all dtypes fail.
-// Reports each retry via a progress-like token to the given message id.
-async function loadOnWasm(modelId, dtypes, msgId) {
-  let lastErr;
-  for (let i = 0; i < dtypes.length; i++) {
-    const dt = dtypes[i];
-    try {
-      const p = await tryPipeline(modelId, { dtype: dt, device: "wasm" });
-      loadedDtype  = dt;
-      activeDevice = "wasm";
-      return p;
-    } catch (e) {
-      lastErr = e;
-      if (isOperatorUnsupported(e) && i < dtypes.length - 1) {
-        const next = dtypes[i + 1];
-        self.postMessage({ id: msgId, type: "progress", payload: {
-          file: `wasm/${dt} 不可 → wasm/${next} で再試行`, pct: 0,
-        }});
-        continue;
-      }
-      throw e;
-    }
-  }
-  throw lastErr;
-}
 
 self.onmessage = async ({ data: { id, type, payload } }) => {
   try {
     // ── load ──────────────────────────────────────────────────────────────
     if (type === "load") {
-      const { modelId, dtype = "q4" } = payload;
+      // forceDevice is set by the main thread when recovering from a lost GPU
+      // ("wasm") — skip device auto-detection and the GPU-backed paths entirely.
+      const { modelId, dtype = "q4", forceDevice = null } = payload;
       loadedModelId = modelId;
       loadedDtype   = dtype;
 
-      // 1. Chrome built-in AI (Gemini Nano) — no external model download
-      if (await checkBuiltinAI()) {
+      // 1. Chrome built-in AI (Gemini Nano) — no external model download.
+      //    Disabled (ENABLE_BUILTIN_AI) so the configured model always runs.
+      if (ENABLE_BUILTIN_AI && forceDevice !== "wasm" && await checkBuiltinAI()) {
         useBuiltinAI = true;
         activeDevice = "built-in";
         const llmApi = getLanguageModelAPI();
@@ -137,7 +142,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       // supported on WebGPU and may be absent on some WASM builds.
       // We fall through strategies until one succeeds.
       useBuiltinAI  = false;
-      const detected = await detectDevice();
+      const detected = forceDevice ?? await detectDevice();
       activeDevice   = detected;
 
       const progressCb = (info) => {
@@ -147,10 +152,16 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         }
       };
 
-      // Strategy list: webgpu → wasm (same dtype) → wasm/q8 → wasm/fp16
+      // Strategy list: webgpu/dtype → wasm/q8 → wasm/fp16
+      // NOTE: q4 / q4f16 use GatherBlockQuantized, which the WASM execution
+      // provider does NOT implement (WebGPU/WebNN only). So we must never put
+      // a block-quantized dtype on a WASM strategy — that produces the
+      // "Could not find an implementation for GatherBlockQuantized" error.
+      const isBlockQuant = (dt) => dt === "q4" || dt === "q4f16";
       const strategies = [];
       strategies.push({ device: detected, dtype });
-      if (detected === "webgpu") strategies.push({ device: "wasm", dtype });
+      if (detected === "webgpu" && !isBlockQuant(dtype))
+        strategies.push({ device: "wasm", dtype });
       if (dtype !== "q8")  strategies.push({ device: "wasm", dtype: "q8" });
       if (dtype !== "fp16") strategies.push({ device: "wasm", dtype: "fp16" });
 
@@ -215,48 +226,26 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         }
 
       } else {
-        const runInference = async (currentPipe) => {
-          const streamer = new TextStreamer(currentPipe.tokenizer, {
-            skip_prompt: true,
-            skip_special_tokens: true,
-            callback_function: (chunk) => {
-              fullText += chunk;
-              self.postMessage({ id, type: "token", payload: { token: chunk } });
-            },
-          });
-          await currentPipe(messages, {
-            max_new_tokens: maxNewTokens,
-            do_sample: false,
-            repetition_penalty: 1.1,
-            streamer,
-            return_full_text: false,
-          });
-        };
-
-        try {
-          await runInference(pipe);
-        } catch (e) {
-          // Trigger WASM fallback on:
-          //   - GPU device lost during inference (OrtRun, Device lost, etc.)
-          //   - Unsupported operator at runtime (GatherBlockQuantized on WebGPU)
-          const needsFallback = (isGpuDeviceLost(e) || isOperatorUnsupported(e)) && loadedModelId;
-          if (needsFallback) {
-            fullText = "";
-            self.postMessage({ id, type: "token", payload: {
-              token: "⚠ GPU エラーが発生しました。CPU (WASM) に切り替えて再試行します...\n\n",
-            }});
-
-            // Dtype waterfall on WASM: current dtype → q8 → fp16
-            const dtypeFallbacks = [loadedDtype, "q8", "fp16"]
-              .filter((v, i, a) => a.indexOf(v) === i);  // deduplicate
-            pipe = await loadOnWasm(loadedModelId, dtypeFallbacks, id);
-
-            fullText = "";
-            await runInference(pipe);
-          } else {
-            throw e;
-          }
-        }
+        const streamer = new TextStreamer(pipe.tokenizer, {
+          skip_prompt: true,
+          skip_special_tokens: true,
+          callback_function: (chunk) => {
+            fullText += chunk;
+            self.postMessage({ id, type: "token", payload: { token: chunk } });
+          },
+        });
+        // Run inference. If the WebGPU backend dies here (Invalid Buffer /
+        // mapAsync / device lost), we do NOT try to recover in this worker —
+        // the shared ORT runtime is poisoned and an in-process WASM reload
+        // fails the same way. We let the error propagate to the main thread,
+        // which terminates this worker and reloads on WASM in a fresh one.
+        await pipe(messages, {
+          max_new_tokens: maxNewTokens,
+          do_sample: false,
+          repetition_penalty: 1.1,
+          streamer,
+          return_full_text: false,
+        });
       }
 
       self.postMessage({ id, type: "done", payload: { fullText } });

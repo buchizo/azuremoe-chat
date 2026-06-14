@@ -8,9 +8,13 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
 {
     private readonly IJSRuntime        _js;
     private readonly NavigationManager _nav;
+    private readonly AppConfig         _cfg;
     private IJSObjectReference?                  _module;
     private DotNetObjectReference<JsLlmEngine>?  _loadRef;
     private DotNetObjectReference<JsLlmEngine>?  _chatRef;
+
+    // New token per app load → browser never serves a stale cached worker.
+    private static readonly string _workerCacheBust = Guid.NewGuid().ToString("N");
 
     private IProgress<(string Text, int Pct)>? _loadProgress;
     private Func<string, ValueTask>?            _onToken;
@@ -19,10 +23,11 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
     public string? Device   { get; private set; }
     public bool    IsLoaded => Device is not null;
 
-    public JsLlmEngine(IJSRuntime js, NavigationManager nav)
+    public JsLlmEngine(IJSRuntime js, NavigationManager nav, AppConfig cfg)
     {
         _js  = js;
         _nav = nav;
+        _cfg = cfg;
     }
 
     private async ValueTask<IJSObjectReference> GetModuleAsync()
@@ -55,7 +60,11 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         var m = await GetModuleAsync();
 
         // Create the Worker before loading the model.
-        var workerUrl = _nav.BaseUri.TrimEnd('/') + "/js/llm-worker.js";
+        // The worker is loaded by a plain (non-fingerprinted) URL, which the
+        // browser caches aggressively — append a per-load token so a fresh
+        // worker is always fetched instead of a stale cached copy. (The worker
+        // is tiny, so re-fetching it once per page load is negligible.)
+        var workerUrl = $"{_nav.BaseUri.TrimEnd('/')}/js/llm-worker.js?v={_workerCacheBust}";
         await m.InvokeVoidAsync("createLlmWorker", ct, workerUrl);
 
         var result = await m.InvokeAsync<JsonElement>("loadLlmModel", ct, modelId, dtype, _loadRef);
@@ -78,7 +87,8 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
 
         var m2 = await GetModuleAsync();
         // Returns { fullText } after all tokens have been streamed.
-        var result = await m2.InvokeAsync<JsonElement>("chat", ct, messagesJson, 1024, _chatRef);
+        var result = await m2.InvokeAsync<JsonElement>(
+            "chat", ct, messagesJson, _cfg.LlmMaxNewTokens, _chatRef);
 
         _chatRef?.Dispose();
         _chatRef = null;
