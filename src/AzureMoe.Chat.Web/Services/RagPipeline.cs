@@ -5,8 +5,8 @@ using AzureMoe.Chat.Web;
 namespace AzureMoe.Chat.Web.Services;
 
 /// <summary>
-/// Orchestrates a RAG turn. Retrieval is graph- and date-aware (see
-/// <see cref="RetrievalEngine"/>); the depth of the turn is set by
+/// Orchestrates a RAG turn. Retrieval is graph- and date-aware (handled by
+/// <see cref="RagInterop"/> / rag-worker.js); the depth of the turn is set by
 /// <see cref="AppConfig.RetrievalMode"/>:
 ///   Fast   — pure vector search, no graph/rewrite. 1 LLM call. Shallow & quick.
 ///   Normal — history-aware query rewrite + graph expansion. ~2 LLM calls.
@@ -19,20 +19,17 @@ namespace AzureMoe.Chat.Web.Services;
 /// </summary>
 public sealed class RagPipeline
 {
-    private readonly RetrievalEngine _retrieval;
-    private readonly QueryAnalyzer   _analyzer;
-    private readonly IEmbedder       _embedder;
-    private readonly ILlmEngine      _llm;
-    private readonly AppConfig       _cfg;
+    private readonly RagInterop    _ragInterop;
+    private readonly QueryAnalyzer _analyzer;
+    private readonly ILlmEngine    _llm;
+    private readonly AppConfig     _cfg;
 
-    public RagPipeline(RetrievalEngine retrieval, QueryAnalyzer analyzer,
-        IEmbedder embedder, ILlmEngine llm, AppConfig cfg)
+    public RagPipeline(RagInterop ragInterop, QueryAnalyzer analyzer, ILlmEngine llm, AppConfig cfg)
     {
-        _retrieval = retrieval;
-        _analyzer  = analyzer;
-        _embedder  = embedder;
-        _llm       = llm;
-        _cfg       = cfg;
+        _ragInterop = ragInterop;
+        _analyzer   = analyzer;
+        _llm        = llm;
+        _cfg        = cfg;
     }
 
     public async ValueTask<IReadOnlyList<ChunkResult>> RunAsync(
@@ -49,15 +46,11 @@ public sealed class RagPipeline
 
         var trimmed = TrimHistory(history);
 
-        // The original question is the authority for final relevance ranking — every
-        // mode collects candidates differently but ranks them against this vector.
-        var origVec = await _embedder.EmbedQueryAsync(userQuery, ct);
-
         var sources = _cfg.RetrievalMode switch
         {
-            RetrievalMode.Deep => await RetrieveDeepAsync(userQuery, trimmed, origVec, Status, ct),
-            RetrievalMode.Fast => await RetrieveOnceAsync(userQuery, rewrite: false, trimmed, origVec, Status, ct),
-            _                  => await RetrieveOnceAsync(userQuery, rewrite: true,  trimmed, origVec, Status, ct),
+            RetrievalMode.Deep => await RetrieveDeepAsync(userQuery, trimmed, Status, ct),
+            RetrievalMode.Fast => await RetrieveOnceAsync(userQuery, rewrite: false, trimmed, Status, ct),
+            _                  => await RetrieveOnceAsync(userQuery, rewrite: true,  trimmed, Status, ct),
         };
 
         // Merge chunks from the same blog post (same URL) into one numbered
@@ -190,76 +183,44 @@ public sealed class RagPipeline
         return !(raw.Contains("NG") && !raw.Contains("OK"));
     }
 
-    // ── Fast / Normal: one recall pass, then rank against the original question ─
+    // ── Fast / Normal: one recall pass ────────────────────────────────────────
 
     private async ValueTask<IReadOnlyList<ChunkResult>> RetrieveOnceAsync(
         string userQuery, bool rewrite, IReadOnlyList<ChatMessage> history,
-        float[] origVec, Action<string> status, CancellationToken ct)
+        Action<string> status, CancellationToken ct)
     {
         var searchQuery = userQuery;
-        var searchVec   = origVec;
         if (rewrite && history.Count > 0)
         {
             status("質問の意図を整理しています…");
             searchQuery = await RewriteQueryAsync(userQuery, history, ct);
-            if (searchQuery != userQuery)
-                searchVec = await _embedder.EmbedQueryAsync(searchQuery, ct);
         }
 
         status("関連する記事を検索しています…");
-        var opt  = OptionsFor(_cfg.RetrievalMode);
-        var cand = await _retrieval.GatherAsync(searchVec, _analyzer.Analyze(searchQuery), opt, ct);
-        return await _retrieval.RankAndSelectAsync(cand, origVec, _analyzer.Analyze(userQuery), opt, ct);
+        var opt     = OptionsFor(_cfg.RetrievalMode);
+        var origQ   = _analyzer.Analyze(userQuery);
+        var searchQ = searchQuery != userQuery ? _analyzer.Analyze(searchQuery) : origQ;
+        return await _ragInterop.RetrieveAsync(userQuery, searchQuery, origQ, searchQ, opt, _cfg.RetrievalMode, ct);
     }
 
-    // ── Deep: multi-query recall (deterministic, on-topic) → rank the union ─────
+    // ── Deep: multi-round recall (all rounds handled inside rag-worker.js) ────
 
     private async ValueTask<IReadOnlyList<ChunkResult>> RetrieveDeepAsync(
         string userQuery, IReadOnlyList<ChatMessage> history,
-        float[] origVec, Action<string> status, CancellationToken ct)
+        Action<string> status, CancellationToken ct)
     {
-        var opt = OptionsFor(RetrievalMode.Deep);
-
         var searchQuery = userQuery;
-        var searchVec   = origVec;
         if (history.Count > 0)
         {
             status("質問の意図を整理しています…");
             searchQuery = await RewriteQueryAsync(userQuery, history, ct);
-            if (searchQuery != userQuery)
-                searchVec = await _embedder.EmbedQueryAsync(searchQuery, ct);
         }
 
-        var union = new Dictionary<long, Candidate>();
-        void Merge(IReadOnlyList<Candidate> cs)
-        {
-            foreach (var c in cs) union.TryAdd(c.Chunk.ChunkId, c);
-        }
-
-        status("関連する記事を検索しています… (1回目)");
-        var round0 = await _retrieval.GatherAsync(searchVec, _analyzer.Analyze(searchQuery), opt, ct);
-        Merge(round0);
-
-        // Deterministic, on-topic follow-ups: search by the titles of the best
-        // round-0 articles. Stays grounded in the corpus (no weak-model query
-        // planning), and the final rank against the original question filters
-        // anything tangential these bring in.
-        var followups = round0.Select(c => c.Chunk.Title)
-            .Where(t => !string.IsNullOrWhiteSpace(t))
-            .Distinct()
-            .Take(Math.Max(0, _cfg.DeepMaxRounds - 1))
-            .ToList();
-
-        for (var i = 0; i < followups.Count; i++)
-        {
-            ct.ThrowIfCancellationRequested();
-            status($"さらに詳しく検索しています… ({i + 2}回目)");
-            var fv = await _embedder.EmbedQueryAsync(followups[i], ct);
-            Merge(await _retrieval.GatherAsync(fv, _analyzer.Analyze(followups[i]), opt, ct));
-        }
-
-        return await _retrieval.RankAndSelectAsync(
-            union.Values.ToList(), origVec, _analyzer.Analyze(userQuery), opt, ct);
+        status("関連する記事を検索しています…");
+        var opt     = OptionsFor(RetrievalMode.Deep);
+        var origQ   = _analyzer.Analyze(userQuery);
+        var searchQ = searchQuery != userQuery ? _analyzer.Analyze(searchQuery) : origQ;
+        return await _ragInterop.RetrieveAsync(userQuery, searchQuery, origQ, searchQ, opt, RetrievalMode.Deep, ct);
     }
 
     // ── Query rewrite (history-aware) ──────────────────────────────────────────

@@ -1,4 +1,4 @@
-using System.ClientModel;
+﻿using System.ClientModel;
 using System.Text.Json;
 using OpenAI;
 using OpenAI.Chat;
@@ -58,6 +58,7 @@ public sealed class EntityExtractor : IDisposable
         - description は日本語で簡潔に
 
         重要な情報がない場合は各フィールドを空配列にしてください。
+        Groundingで得られた内容に含まれないURLを勝手に生成してはいけません。
         """;
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };

@@ -130,6 +130,12 @@ a.url:hover { color: #7eecea; }
 .line.ai > *:first-child,.line.ai-stream > *:first-child { margin-top:0 !important; }
 .line.ai > *:last-child, .line.ai-stream > *:last-child  { margin-bottom:0 !important; }
 
+/* Provisional streaming answer — dim + italic to signal in-progress */
+.line.ai-stream { color: var(--fg-dim); font-style: italic; }
+.line.ai-stream h1, .line.ai-stream h2, .line.ai-stream h3,
+.line.ai-stream h4, .line.ai-stream h5, .line.ai-stream h6,
+.line.ai-stream code, .line.ai-stream pre, .line.ai-stream pre code { font-style: normal; }
+
 /* ── Error UI ───────────────────────────────────────────────────────────── */
 #blazor-error-ui { position: fixed; bottom: 0; left: 0; right: 0; background: #550000; color: #fff; padding: .5rem 1rem; display: none; font-size: 13px; }
 #blazor-error-ui.blazor-error-ui-show { display: block; }

@@ -18,22 +18,16 @@ builder.Services.AddScoped(sp =>
 
 // App services (scoped so they share lifetime with the DI scope)
 builder.Services.AddScoped<AssetLoader>();
-builder.Services.AddScoped<JsGraphStore>();
-builder.Services.AddScoped<JsEmbedder>();
+builder.Services.AddScoped<RagInterop>();
 builder.Services.AddScoped<JsLlmEngine>();
 builder.Services.AddSingleton<QueryAnalyzer>();
-builder.Services.AddScoped<RetrievalEngine>(sp => new RetrievalEngine(
-    sp.GetRequiredService<JsGraphStore>()));
 builder.Services.AddScoped<RagPipeline>(sp => new RagPipeline(
-    sp.GetRequiredService<RetrievalEngine>(),
+    sp.GetRequiredService<RagInterop>(),
     sp.GetRequiredService<QueryAnalyzer>(),
-    sp.GetRequiredService<JsEmbedder>(),
     sp.GetRequiredService<JsLlmEngine>(),
     sp.GetRequiredService<AppConfig>()));
 
-// Register interfaces so pages can inject either way
-builder.Services.AddScoped<IGraphStore>(sp => sp.GetRequiredService<JsGraphStore>());
-builder.Services.AddScoped<IEmbedder>(sp => sp.GetRequiredService<JsEmbedder>());
+// Register ILlmEngine so RagPipeline can inject it
 builder.Services.AddScoped<ILlmEngine>(sp => sp.GetRequiredService<JsLlmEngine>());
 
 await builder.Build().RunAsync();

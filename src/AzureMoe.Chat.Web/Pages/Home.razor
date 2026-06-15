@@ -1,9 +1,8 @@
-@page "/"
+﻿@page "/"
 @using AzureMoe.Chat.Web.Services
 @inject IJSRuntime JS
 @inject AssetLoader AssetLoader
-@inject JsGraphStore GraphStore
-@inject JsEmbedder Embedder
+@inject RagInterop RagInterop
 @inject JsLlmEngine LlmEngine
 @inject RagPipeline Rag
 @inject AppConfig Cfg
@@ -154,24 +153,32 @@ else
             dbBytes = await AssetLoader.LoadDbAsync(manifest, dbProg, _cts.Token);
             Print($"DB {(dbFromCache ? "キャッシュ読み込み" : "ダウンロード")}完了 ({dbBytes.Length / 1024:N0} KB)", "ok");
 
-            // ── Step 3: LadybugDB init ──
-            Status("GraphDB を初期化中...");
-            await GraphStore.InitAsync(dbBytes, _cts.Token);
-            Print("GraphDB 初期化完了", "ok");
+            // ── Step 3: RAG worker init (DB + embedding model) ──
+            Status("GraphDB + 埋め込みモデルを初期化中...");
+            var ragProg = new Progress<(string Stage, string File, int Pct)>(t =>
+            {
+                var label = t.Stage == "db" ? "GraphDB" : "埋め込みモデル";
+                Status($"{label}: {t.File} {t.Pct}%");
+            });
+            await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, ragProg, _cts.Token);
+            Print("GraphDB + 埋め込みモデル準備完了", "ok");
 
-            // ── Step 4: Embedding model ──
-            Status($"埋め込みモデルを読み込み中 ({Cfg.EmbeddingModelId})...");
-            var embedProg = new Progress<(string File, int Pct)>(t =>
-                Status($"埋め込みモデル: {t.File} {t.Pct}%"));
-            await Embedder.LoadAsync(Cfg.EmbeddingModelId, embedProg, _cts.Token);
-            Print("埋め込みモデル準備完了", "ok");
-
-            // ── Step 5: LLM info (loaded on first query) ──
+            // ── Step 4: LLM preload ──
             var hasBuiltinAi = await LlmEngine.CheckBuiltinAiAsync(_cts.Token);
             if (hasBuiltinAi)
-                Print("LLM: Chrome 組み込み AI (Gemini Nano)  利用可能 — ダウンロード不要", "info");
+            {
+                Status("LLM を初期化中 (Chrome 組み込み AI)...");
+                await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, null, _cts.Token);
+            }
             else
-                Print($"LLM: {Cfg.LlmModelId} ({Cfg.LlmDtype})  初回クエリ時に自動ダウンロード", "info");
+            {
+                Status($"LLM をダウンロード中 ({Cfg.LlmModelId})...");
+                var llmProg = new Progress<(string Text, int Pct)>(t =>
+                    Status($"LLM: {t.Text}  {t.Pct}%"));
+                await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, llmProg, _cts.Token);
+                Status($"LLM: {Cfg.LlmModelId}  100%");
+            }
+            Print($"LLM 準備完了  [{LlmEngine.Device}]", "ok");
 
             Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}  (/mode で変更)", "info");
 
@@ -234,23 +241,6 @@ else
         StateHasChanged();
         try
         {
-            // Load LLM on first use.
-            // Priority: Chrome built-in AI (no download) → WebGPU → WASM CPU.
-            if (!LlmEngine.IsLoaded)
-            {
-                var builtinAi = await LlmEngine.CheckBuiltinAiAsync(_cts.Token);
-                if (builtinAi)
-                    Status("LLM を初期化中 (Chrome 組み込み AI)...");
-                else
-                    Status($"LLM をダウンロード中 ({Cfg.LlmModelId})...");
-
-                var llmProg = new Progress<(string Text, int Pct)>(t =>
-                    Status($"LLM: {t.Text}  {t.Pct}%"));
-                await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, llmProg, _cts.Token);
-                Print($"LLM 準備完了  [{LlmEngine.Device}]", "ok");
-                PrintBlank();
-            }
-
             {
                 IReadOnlyList<ChunkResult>? sources = null;
                 _streamBuf.Clear();
@@ -369,10 +359,10 @@ else
                 _lines.Clear();
                 _history.Clear();
                 // Unload loaded models first so reload truly starts fresh,
-                // rather than re-using the already-loaded LLM/embedding worker.
+                // rather than re-using the already-loaded LLM/RAG worker.
                 _ready = false;
                 await LlmEngine.UnloadAsync(_cts.Token);
-                await Embedder.UnloadAsync(_cts.Token);
+                await RagInterop.UnloadAsync(_cts.Token);
                 await RunStartupAsync();
                 return;
             default:
@@ -384,7 +374,13 @@ else
 
     // ── Output helpers ──────────────────────────────────────────────────────
 
-    private void Print(string html, string css = "")         => _lines.Add(new Line(html, css));
+    private void Print(string html, string css = "")
+    {
+        // Consume any trailing status line so progress updates don't linger.
+        if (_lines.Count > 0 && _lines[^1].Css == "status")
+            _lines.RemoveAt(_lines.Count - 1);
+        _lines.Add(new Line(html, css));
+    }
     private void PrintBlank()                                => _lines.Add(new Line("&nbsp;", "blank"));
     private void Status(string msg)
     {
@@ -402,7 +398,6 @@ else
         Print("  /help     — このヘルプを表示", "dim");
         Print("  /mode [fast|normal|deep] — 探索の深さを表示/変更", "dim");
         Print("  /model    — 現在のモデル情報", "dim");
-        Print("  /history  — 会話履歴の件数", "dim");
         Print("  /license  — ライセンス情報を表示", "dim");
         Print("  /clear    — 画面と会話履歴をクリア", "dim");
         Print("  /reload   — 再起動", "dim");
@@ -411,9 +406,9 @@ else
 
     private static string ModeLabel(RetrievalMode m) => m switch
     {
-        RetrievalMode.Fast   => "Fast (高速・LLM1回)",
-        RetrievalMode.Deep   => "Deep (高精度・LLM多用)",
-        _                    => "Normal (バランス・LLM2回)",
+        RetrievalMode.Fast   => "Fast (高速)",
+        RetrievalMode.Deep   => "Deep (高精度・処理時間長め)",
+        _                    => "Normal (バランス)",
     };
 
     private void SetMode(string arg)
@@ -491,9 +486,8 @@ else
         for (var i = 0; i < sources.Count; i++)
         {
             var c    = sources[i];
-            var sim  = (1.0 - c.Distance).ToString("F3");
             var date = c.Date.Length >= 10 ? c.Date[..10] : c.Date;
-            Print($"<span class='rank'>[{i + 1}]</span> <span class='sim'>{sim}</span>  " +
+            Print($"<span class='rank'>[{i + 1}]</span> " +
                   $"<a class='url' href='{EscapeHtml(c.Url)}' target='_blank'>{EscapeHtml(c.Title)}</a>" +
                   $"  <span class='dim'>{date}</span>", "source");
         }

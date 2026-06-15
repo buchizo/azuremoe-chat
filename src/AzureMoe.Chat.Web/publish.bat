@@ -3,8 +3,13 @@ REM ============================================================================
 REM  Build the Cloudflare deploy artifact for AzureMoe.Chat.Web.
 REM
 REM  Steps:
-REM    1. Clean previous publish output and obj\Release (so AOT relinks cleanly)
-REM    2. dotnet publish -c Release  (AOT + trimming; needs wasm-tools workload)
+REM    1. Clean previous publish output and obj\Release
+REM    2. dotnet publish -c Release  (trimming only; ~30 s)
+REM       AOT is disabled by default - retrieval runs in JS workers so C# is
+REM       no longer the hot path.  To re-enable AOT (Blazor renderer is slightly
+REM       faster for token streaming, but adds 5-10 min to the build):
+REM         remove -p:RunAOTCompilation=false from the publish command and
+REM         also add -p:WasmStripILAfterAOT=true
 REM    3. Delete pre-compressed .br/.gz  (Cloudflare compresses at the edge; the
 REM       sibling files are dead weight and bloat the file count)
 REM    4. Copy index.html -> 404.html  (SPA fallback; harmless even with the
@@ -22,10 +27,11 @@ echo.
 echo === [1/4] Cleaning previous output ===
 if exist "%OUT%" rmdir /s /q "%OUT%"
 if exist "%~dp0obj\Release" rmdir /s /q "%~dp0obj\Release"
+REM (obj\Release cleanup ensures a clean incremental build; not strictly needed without AOT)
 
 echo.
-echo === [2/4] dotnet publish (Release, AOT) ===
-dotnet publish "%PROJ%" -c Release -o "%OUT%"
+echo === [2/4] dotnet publish (Release, no AOT) ===
+dotnet publish "%PROJ%" -c Release -o "%OUT%" -p:RunAOTCompilation=false
 if errorlevel 1 (
   echo.
   echo *** publish FAILED - aborting. ***

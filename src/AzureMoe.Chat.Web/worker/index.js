@@ -36,6 +36,17 @@ export default {
       });
     }
 
+    // /lib/ contains large, infrequently-changing runtime bundles (e.g. the
+    // Kuzu/LadybugDB WASM bundle at ~8 MB). Give them a long-lived cache so the
+    // browser can reuse the compiled WASM across sessions. Content doesn't change
+    // unless the package version is bumped, so stale risk is low.
+    if (url.pathname.startsWith("/lib/")) {
+      const res = await env.ASSETS.fetch(request);
+      const headers = new Headers(res.headers);
+      headers.set("Cache-Control", "public, max-age=86400, stale-while-revalidate=604800");
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+    }
+
     const res = await env.ASSETS.fetch(request);
 
     // Our hand-written JS modules/workers under /js/ are NOT fingerprinted, so a
