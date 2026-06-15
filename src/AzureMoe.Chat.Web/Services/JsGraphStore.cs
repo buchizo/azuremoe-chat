@@ -43,14 +43,16 @@ public sealed class JsGraphStore : IGraphStore, IAsyncDisposable
     public ValueTask<IReadOnlyList<ChunkResult>> VectorSearchAsync(
         float[] queryVec, int topK, CancellationToken ct = default)
     {
+        // $qv is bound to queryVec via the queryWithVec interop — the vector travels
+        // as a JS number array, not as 384 inline float tokens in the Cypher string.
         var cypher = $"""
-            CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_emb_idx', {VecLiteral(queryVec)}, {topK})
+            CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_emb_idx', $qv, {topK})
             YIELD node AS c, distance
             MATCH (p:Post)-[:HAS_CHUNK]->(c)
             RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, distance
             ORDER BY distance
             """;
-        return QueryChunksAsync(cypher, ct);
+        return QueryChunksWithVecAsync(cypher, queryVec, ct);
     }
 
     public ValueTask<IReadOnlyList<ChunkResult>> VectorSearchInDateRangeAsync(
@@ -58,7 +60,7 @@ public sealed class JsGraphStore : IGraphStore, IAsyncDisposable
         CancellationToken ct = default)
     {
         var cypher = $"""
-            CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_emb_idx', {VecLiteral(queryVec)}, {overFetch})
+            CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_emb_idx', $qv, {overFetch})
             YIELD node AS c, distance
             MATCH (p:Post)-[:HAS_CHUNK]->(c)
             WHERE p.date >= '{Esc(fromIso)}' AND p.date < '{Esc(toIso)}'
@@ -66,7 +68,7 @@ public sealed class JsGraphStore : IGraphStore, IAsyncDisposable
             ORDER BY distance
             LIMIT {topK}
             """;
-        return QueryChunksAsync(cypher, ct);
+        return QueryChunksWithVecAsync(cypher, queryVec, ct);
     }
 
     public ValueTask<IReadOnlyList<ChunkResult>> ChunksByDateRangeAsync(
@@ -179,6 +181,15 @@ public sealed class JsGraphStore : IGraphStore, IAsyncDisposable
         return results;
     }
 
+    private async ValueTask<IReadOnlyList<ChunkResult>> QueryChunksWithVecAsync(string cypher, float[] vec, CancellationToken ct)
+    {
+        var rows = await RunWithVecAsync(cypher, vec, ct);
+        var results = new List<ChunkResult>();
+        foreach (var row in rows)
+            results.Add(ReadChunk(row));
+        return results;
+    }
+
     private async ValueTask<IReadOnlyList<GraphChunk>> QueryGraphChunksAsync(string cypher, CancellationToken ct)
     {
         var rows = await RunAsync(cypher, ct);
@@ -199,6 +210,14 @@ public sealed class JsGraphStore : IGraphStore, IAsyncDisposable
         return res.GetProperty("rows").EnumerateArray();
     }
 
+    private async ValueTask<JsonElement.ArrayEnumerator> RunWithVecAsync(string cypher, float[] vec, CancellationToken ct)
+    {
+        if (!_initialised) throw new InvalidOperationException("GraphStore not initialised");
+        var m = await GetModuleAsync();
+        var res = await m.InvokeAsync<JsonElement>("queryWithVec", ct, cypher, vec);
+        return res.GetProperty("rows").EnumerateArray();
+    }
+
     private static ChunkResult ReadChunk(JsonElement row) => new(
         Title:    row.TryGetProperty("title",    out var t) ? t.GetString() ?? "" : "",
         Date:     row.TryGetProperty("date",     out var d) ? d.GetString() ?? "" : "",
@@ -209,12 +228,6 @@ public sealed class JsGraphStore : IGraphStore, IAsyncDisposable
 
     private static ValueTask<IReadOnlyList<GraphChunk>> Empty() =>
         ValueTask.FromResult<IReadOnlyList<GraphChunk>>([]);
-
-    private static string VecLiteral(float[] vec)
-    {
-        var vals = string.Join(",", vec.Select(v => v.ToString("R", CultureInfo.InvariantCulture)));
-        return $"CAST([{vals}] AS FLOAT[{vec.Length}])";
-    }
 
     private static string IdList(IReadOnlyList<long> ids)
     {

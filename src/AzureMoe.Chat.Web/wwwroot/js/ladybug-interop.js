@@ -19,7 +19,14 @@ function call(type, payload) {
 export function createWorker(workerUrl) {
   if (worker) return;
   worker = new Worker(workerUrl, { type: "module" });
-  worker.onerror = (e) => console.error("[ladybug-worker] error:", e);
+  // If the worker dies outside the message try/catch (e.g. a WASM abort), reject
+  // every in-flight call so it surfaces instead of hanging forever.
+  worker.onerror = (e) => {
+    const msg = `[ladybug-worker] ${e?.message ?? "worker error"} @ ${e?.filename ?? "?"}:${e?.lineno ?? "?"}`;
+    console.error(msg, e);
+    for (const [, entry] of pending) entry.reject(new Error(msg));
+    pending.clear();
+  };
   worker.onmessage = ({ data: { id, result, error } }) => {
     const entry = pending.get(id);
     if (!entry) return;
@@ -35,7 +42,14 @@ export async function initDb(dbBytes) {
   return call("init", { dbBytes: dbBytes.buffer });
 }
 
-// Run a Cypher query and return { rows: object[] }.
+// Run a plain Cypher query and return { rows: object[] }.
 export async function query(cypher) {
   return call("query", { cypher });
+}
+
+// Run a vector-index Cypher query where $qv is the query vector.
+// Passing the vector separately avoids inlining 384 floats into the Cypher string
+// and eliminates the need for regex extraction on the worker side.
+export async function queryWithVec(cypher, qv) {
+  return call("query", { cypher, params: { qv } });
 }

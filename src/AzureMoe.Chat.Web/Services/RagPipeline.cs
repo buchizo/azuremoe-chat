@@ -164,18 +164,25 @@ public sealed class RagPipeline
         return s.Trim();
     }
 
+    // Max chars of context to send to the grounding check. The full 6 000-char
+    // context would force the model to process ~1 500 tokens just to output "OK"
+    // or "NG". Truncating to 2 000 chars cuts ~1 000 input tokens per check while
+    // still giving the model enough text to spot obvious hallucinations.
+    private const int GroundingContextCap = 2000;
+
     /// <summary>Second LLM pass: is the answer supported only by the context?
     /// Deliberately lenient on ambiguity (don't cry wolf) but flags clear drift
     /// into facts/names/dates absent from the context.</summary>
     private async ValueTask<bool> IsGroundedAsync(string answer, string context, CancellationToken ct)
     {
+        var ctx = context.Length > GroundingContextCap ? context[..GroundingContextCap] : context;
         var messages = new List<ChatMessage>
         {
             new("system",
                 "あなたは厳密な校正者です。『回答』が『参考情報』だけで裏付けられるか判定してください。" +
                 "参考情報に書かれていない事実・製品名・数値・日付が回答に含まれる場合は不合格です。" +
                 "裏付けられるなら『OK』、そうでなければ『NG』とだけ出力してください。"),
-            new("user", $"## 参考情報\n{context}\n\n## 回答\n{answer}\n\n判定（OK か NG のみ）:"),
+            new("user", $"## 参考情報\n{ctx}\n\n## 回答\n{answer}\n\n判定（OK か NG のみ）:"),
         };
 
         var raw = (await _llm.CompleteAsync(messages, 8, ct)).ToUpperInvariant();

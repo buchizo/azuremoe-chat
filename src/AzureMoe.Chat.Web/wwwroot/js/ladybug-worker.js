@@ -18,22 +18,55 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
     let result;
 
     if (type === "init") {
-      await lbug.init();
-      const bytes = new Uint8Array(payload.dbBytes);
-      lbug.getFS().createDataFile("/", "chat.db", bytes, true, true, true);
-      db   = new lbug.Database("/chat.db");
-      conn = new lbug.Connection(db);
-      result = { ok: true, version: lbug.getVersion() };
+      try {
+        await lbug.init();
+        const bytes = new Uint8Array(payload.dbBytes);
+        lbug.getFS().createDataFile("/", "chat.db", bytes, true, true, true);
+        db   = new lbug.Database("/chat.db");
+        conn = new lbug.Connection(db);
+        result = { ok: true, version: lbug.getVersion() };
+      } catch (e) {
+        throw new Error(`init failed (dbLen=${payload?.dbBytes?.byteLength}): ${e?.message ?? e}`);
+      }
 
     } else if (type === "query") {
       if (!conn) throw new Error("DB not initialised — call init first");
-      const r = conn.query(payload.cypher);
+      const cy     = payload.cypher ?? "";
+      const params = payload.params ?? null;   // e.g. { qv: [...] } for vector queries
+
+      let r;
+      try {
+        if (params) {
+          // Parameterised query: used for vector searches ($qv) so the float array
+          // travels as data rather than being inlined into the Cypher string.
+          const ps = conn.prepare(cy);
+          if (!ps.isSuccess()) {
+            const em = ps.getErrorMessage();
+            ps.close?.();
+            throw new Error(`prepare failed: ${em}`);
+          }
+          r = conn.execute(ps, params);
+          ps.close?.();
+        } else {
+          r = conn.query(cy);
+        }
+      } catch (e) {
+        throw new Error(`query() threw: ${e?.message ?? e}`);
+      }
+
       if (!r.isSuccess()) {
         const msg = r.getErrorMessage();
         r.close();
-        throw new Error(msg);
+        throw new Error(`cypher error: ${msg}`);
       }
-      const rows = plain(r.getAllObjects());
+
+      let rows;
+      try {
+        rows = plain(r.getAllObjects());
+      } catch (e) {
+        r.close();
+        throw new Error(`result parse threw: ${e?.message ?? e}`);
+      }
       r.close();
       result = { rows };
 

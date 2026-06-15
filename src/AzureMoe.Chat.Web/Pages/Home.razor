@@ -134,16 +134,25 @@ else
             Print($"DB: {manifest.DatabaseFile}  " +
                   $"投稿 {manifest.PostCount} 件 / チャンク {manifest.ChunkCount} 件", "info");
 
-            // ── Step 2: DB download ──
-            Status("GraphDB をダウンロード中...");
+            // ── Step 2: DB download (or cache hit) ──
+            Status("GraphDB を読み込み中...");
             byte[]? dbBytes = null;
+            var dbFromCache = false;
             var dbProg = new Progress<(long Recv, long Total)>(t =>
             {
-                var pct = t.Total > 0 ? (int)(t.Recv * 100 / t.Total) : 0;
-                Status($"GraphDB ダウンロード中... {pct}%  ({t.Recv / 1024:N0} KB)");
+                if (t.Total == 0 && t.Recv == 0)
+                {
+                    dbFromCache = true;
+                    Status("GraphDB をキャッシュから読み込み中...");
+                }
+                else
+                {
+                    var pct = t.Total > 0 ? (int)(t.Recv * 100 / t.Total) : 0;
+                    Status($"GraphDB をダウンロード中... {pct}%  ({t.Recv / 1024:N0} KB)");
+                }
             });
             dbBytes = await AssetLoader.LoadDbAsync(manifest, dbProg, _cts.Token);
-            Print($"DB ダウンロード完了 ({dbBytes.Length / 1024:N0} KB)", "ok");
+            Print($"DB {(dbFromCache ? "キャッシュ読み込み" : "ダウンロード")}完了 ({dbBytes.Length / 1024:N0} KB)", "ok");
 
             // ── Step 3: LadybugDB init ──
             Status("GraphDB を初期化中...");

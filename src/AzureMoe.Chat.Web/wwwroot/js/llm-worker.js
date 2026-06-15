@@ -39,6 +39,17 @@ if (self.crossOriginIsolated) {
 // (LFM2.5-1.2B-JP-ONNX) is built for ONNX Runtime Web + WebGPU.
 const ENABLE_WEBGPU = true;
 
+// ORT WebGPU configuration: request high-performance GPU (avoids Edge selecting
+// an integrated GPU with problematic D3D12 fence behaviour), and pre-configure
+// graph capture as disabled so we can override it per session below.
+// Must be set before any pipeline() call that touches the WebGPU backend.
+try {
+  if (env.backends?.onnx) {
+    if (!env.backends.onnx.webgpu) env.backends.onnx.webgpu = {};
+    env.backends.onnx.webgpu.powerPreference = "high-performance";
+  }
+} catch { /* env structure differs between versions — skip silently */ }
+
 // Chrome's built-in Gemini Nano is a DIFFERENT model than the configured one.
 // Disabled so the configured LLM is always what runs.
 const ENABLE_BUILTIN_AI = false;
@@ -192,7 +203,16 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       for (let i = 0; i < strategies.length; i++) {
         const s = strategies[i];
         try {
-          const opts = { dtype: s.dtype, device: s.device, progress_callback: progressCb };
+          // Disable graph capture for WebGPU: it is a perf optimisation that
+          // pre-records GPU command buffers on the first run, but the underlying
+          // D3D12 fence can deadlock in Edge on non-localhost HTTPS, causing the
+          // first inference to hang indefinitely (GPU 0%, CPU ~10%, no error).
+          const opts = {
+            dtype: s.dtype,
+            device: s.device,
+            progress_callback: progressCb,
+            ...(s.device === "webgpu" ? { session_options: { enableGraphCapture: false } } : {}),
+          };
           pipe         = await tryPipeline(modelId, opts);
           activeDevice = s.device;
           loadedDtype  = s.dtype;
@@ -262,11 +282,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
             if (interrupted) throw new Error(INTERRUPT_SENTINEL);
           },
         });
-        // Run inference. If the WebGPU backend dies here (Invalid Buffer /
-        // mapAsync / device lost), we do NOT try to recover in this worker —
-        // the shared ORT runtime is poisoned and an in-process WASM reload
-        // fails the same way. We let the error propagate to the main thread,
-        // which terminates this worker and reloads on WASM in a fresh one.
+
         await pipe(messages, {
           max_new_tokens: maxNewTokens,
           // Light sampling instead of greedy decoding. Greedy on a small (1.2B)

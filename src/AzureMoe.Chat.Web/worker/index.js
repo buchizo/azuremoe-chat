@@ -36,6 +36,16 @@ export default {
       });
     }
 
-    return env.ASSETS.fetch(request);
+    const res = await env.ASSETS.fetch(request);
+
+    // Our hand-written JS modules/workers under /js/ are NOT fingerprinted, so a
+    // browser-cached copy silently shadows a redeploy (you keep running old code
+    // even after `wrangler deploy`). Force no-store so every load refetches them.
+    if (url.pathname.startsWith("/js/")) {
+      const headers = new Headers(res.headers);
+      headers.set("Cache-Control", "no-store");
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+    }
+    return res;
   },
 };

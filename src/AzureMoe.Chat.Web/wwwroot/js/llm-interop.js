@@ -7,6 +7,10 @@
 // poisoned — a WASM reload *inside the same worker* fails the same way. So the
 // only reliable recovery is to TERMINATE the worker and spawn a fresh one with
 // a clean runtime, then reload the model on WASM. That logic lives here.
+//
+// Root-cause fix for Edge HTTPS hang: llm-worker.js now sets
+// session_options.enableGraphCapture = false on WebGPU sessions, preventing
+// the D3D12 fence deadlock that caused silent infinite hangs on first inference.
 
 let worker = null;
 // Map of id → { resolve, reject, onProgress?, onToken? }
@@ -50,10 +54,9 @@ function send(type, payload, callbacks = {}) {
 function isGpuLost(message) {
   const msg = String(message ?? "");
   // WebGPU-specific failures that a CPU (WASM) reload can recover from:
-  // device loss, invalid/poisoned buffers, and operational limits like
-  // unaligned buffer accesses. We deliberately do NOT match deterministic,
-  // backend-independent failures here (e.g. "Integer overflow" from an absurd
-  // token count) — a worker restart wouldn't help, so let those surface.
+  // device loss, invalid/poisoned buffers, unaligned accesses.
+  // We deliberately do NOT match deterministic, backend-independent failures
+  // (e.g. "Integer overflow") — a worker restart wouldn't help those.
   return msg.includes("mapAsync") ||
          msg.includes("Invalid Buffer") ||
          msg.includes("is invalid due to a previous error") ||
