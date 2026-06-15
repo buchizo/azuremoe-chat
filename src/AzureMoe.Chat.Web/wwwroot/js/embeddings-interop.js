@@ -2,6 +2,17 @@
 // Uses multilingual-e5-small, the same model as the ingest ONNX side (POC-3 verified).
 import { pipeline, env } from "https://esm.sh/@huggingface/transformers@4";
 
+// In production the page is cross-origin isolated (coi-serviceworker sets COEP
+// for SharedArrayBuffer), which blocks direct cross-origin downloads from
+// huggingface.co with a CORS error. Route model fetches through our same-origin
+// Worker proxy (/hf/* → huggingface.co) so they bypass CORS/COEP. Local dev
+// talks to HF directly — the /hf route only exists on the deployed Worker.
+const isLocalDev = self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
+if (!isLocalDev) {
+  env.remoteHost = self.location.origin;
+  env.remotePathTemplate = "hf/{model}/resolve/{revision}/";
+}
+
 let extractor = null;
 let _modelId = null;
 

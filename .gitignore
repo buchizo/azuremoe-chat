@@ -505,3 +505,6 @@ poc/**/.chrome-profile/
 poc/**/.probe-profile/
 poc/poc3-embeddings/model/
 
+# Wrangler (Cloudflare) local state/cache
+.wrangler/
+

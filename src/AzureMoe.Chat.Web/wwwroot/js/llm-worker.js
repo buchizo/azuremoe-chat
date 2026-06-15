@@ -11,6 +11,17 @@
 // and by keeping GPU buffers small (trimmed history + bounded max tokens).
 import { env, pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4.2.0";
 
+// In production the page is cross-origin isolated (coi-serviceworker sets COEP
+// for SharedArrayBuffer), which blocks direct cross-origin downloads from
+// huggingface.co with a CORS error. Route model fetches through our same-origin
+// Worker proxy (/hf/* → huggingface.co) so they bypass CORS/COEP. Local dev
+// talks to HF directly — the /hf route only exists on the deployed Worker.
+const isLocalDev = self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
+if (!isLocalDev) {
+  env.remoteHost = self.location.origin;
+  env.remotePathTemplate = "hf/{model}/resolve/{revision}/";
+}
+
 // Multi-threaded WASM needs SharedArrayBuffer, which requires cross-origin
 // isolation (provided by coi-serviceworker.js). When isolated, use most of the
 // CPU cores; otherwise ORT falls back to single-threaded (much slower).

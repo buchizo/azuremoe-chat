@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "azuremoe-chat",
+  "main": "worker/index.js",
+  "compatibility_date": "2025-06-01",
+  "assets": {
+    // Published Blazor output. Run `dotnet publish -c Release` first, then the
+    // post-publish cleanup (delete .br/.gz, copy index.html -> 404.html).
+    "directory": "./publish/wwwroot",
+    "binding": "ASSETS",
+    // Unknown routes serve index.html so Blazor's client-side router handles
+    // deep links and refreshes (SPA fallback).
+    "not_found_handling": "single-page-application",
+    // Without this, the assets layer runs first and SPA fallback returns
+    // index.html for /hf/* before the Worker's proxy ever runs (transformers.js
+    // then gets HTML instead of JSON: "Unexpected token '<'"). true = the Worker
+    // runs for every request; worker/index.js proxies /hf/* and delegates all
+    // other paths to env.ASSETS (which still applies the SPA fallback). The
+    // path-array form (["/hf/*"]) is more efficient but needs a recent wrangler.
+    "run_worker_first": true
+  }
+}

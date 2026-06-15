@@ -445,4 +445,85 @@ dotnet run --project src/AzureMoe.Chat.Web
 2. 質問入力時 (モードにより広さが変わる): クエリ解析 (日付・キーワード抽出) → ベクトル＋グラフ＋日付で候補を収集 → **元の質問への関連度で再ランク・足切り** → URL 単位でまとめてコンテキスト構築 → WebLLM でストリーミング生成 → 接地検査
 3. WebGPU 非対応環境: WASM CPU にフォールバックして生成 (低速)
 
+---
+
+## デプロイ (Cloudflare Workers)
+
+チャットアプリは **Cloudflare Workers (Static Assets)** にデプロイする。静的アセットの配信に加えて、
+小さな Worker スクリプトで「HuggingFace のモデル取得プロキシ」と「SPA フォールバック」を担う。
+
+> **重要**: 必ず **`npx wrangler deploy`** でデプロイすること。
+> ダッシュボードの手動アップロードは**静的アセットのみ**で Worker スクリプト (`worker/index.js`) を反映しないため、
+> 後述の `/hf` プロキシも SPA フォールバックも動かない。
+
+### 構成ファイル (`src/AzureMoe.Chat.Web/`)
+
+| ファイル | 役割 |
+|---|---|
+| `publish.bat` | デプロイ成果物 (`publish/wwwroot`) をビルドするバッチ |
+| `wrangler.jsonc` | Worker + アセットのデプロイ設定 |
+| `worker/index.js` | `/hf/*` を huggingface.co へ中継 / それ以外は静的アセットへ委譲 |
+
+#### なぜ `/hf` プロキシが必要か
+
+アプリは `coi-serviceworker.js` で **cross-origin isolation (COEP)** を有効化している
+(SharedArrayBuffer = マルチスレッド WASM のため)。この状態だと transformers.js が
+`huggingface.co` から**直接**モデルを取得する際に CORS でブロックされる
+(`No 'Access-Control-Allow-Origin' header` エラー)。そこで Worker で `/hf/*` を**同一オリジン**として
+中継し、CORS/COEP のチェック自体を回避する。`wwwroot/js/{embeddings-interop,llm-worker}.js` は本番時のみ
+`env.remoteHost` / `env.remotePathTemplate` を `/hf` 経由に切り替える (localhost は HF 直結のまま)。
+
+`wrangler.jsonc` の `not_found_handling: "single-page-application"` で、未マッチのパスは `index.html` を返し、
+Blazor のクライアントルーティング (深いリンクの直接リロード) が成立する。`run_worker_first: true` は
+SPA フォールバックが `/hf/*` を飲み込む前に Worker を先に通すために必要。
+
+### 1. 成果物のビルド
+
+`src/AzureMoe.Chat.Web/` で `publish.bat` を実行する (ダブルクリックでも可)。
+
+```bat
+cd src\AzureMoe.Chat.Web
+publish.bat
+```
+
+`publish.bat` は以下を順に行う:
+
+1. 旧 `publish/` と `obj/Release/` を削除 (AOT をクリーンに再リンク)
+2. `dotnet publish -c Release` — **AOT コンパイル + トリミング** (`wasm-tools` ワークロードが必要)
+3. `.br` / `.gz` を削除 — Cloudflare がエッジで圧縮するため事前圧縮ファイルは不要 (ファイル数も削減)
+4. `index.html` を `404.html` にコピー (SPA フォールバックの予備)
+
+> **`wasm-tools` の導入** (初回のみ): `dotnet workload install wasm-tools`
+> AOT は実行速度を上げる代わりに転送サイズが約 2 倍になる (brotli 後 `dotnet.native.wasm` ≈ 3.8 MB)。
+> サイズ優先にしたい場合は `AzureMoe.Chat.Web.csproj` の `RunAOTCompilation` / `WasmStripILAfterAOT` を外す。
+
+> **`index.html` のフィンガープリント**: csproj は `OverrideHtmlAssetPlaceholders=true` のため、
+> ブートスクリプトは `<script src="_framework/blazor.webassembly#[.{fingerprint}].js">` の
+> プレースホルダー記法で書く必要がある。プレーン名 (`blazor.webassembly.js`) だと publish 後に 404 になり
+> "Initializing" のまま固まる。
+
+### 2. デプロイ
+
+```bash
+cd src/AzureMoe.Chat.Web
+npx wrangler login     # 初回のみ (ブラウザ認証)
+npx wrangler deploy
+```
+
+`wrangler deploy` が `wrangler.jsonc` に従って `publish/wwwroot` (静的アセット) と `worker/index.js` を
+まとめてアップロードする。
+
+### 3. 確認
+
+```bash
+# モデルプロキシが JSON を返すか (text/html ならプロキシが効いていない)
+curl -sI https://<your-worker>.workers.dev/hf/Xenova/multilingual-e5-small/resolve/main/config.json
+```
+
+ブラウザでは、トップ起動 → モデルが `…/hf/…` 経由でダウンロード → 深いパスの直接リロードでアプリ表示、を確認する。
+
+> **キャッシュに注意**: プロキシ挙動を変えた後は、transformers.js の Cache API (`transformers-cache`) や
+> coi service worker が**失敗時の古いレスポンスを保持**していることがある。Ctrl+F5 では Cache Storage は消えないため、
+> DevTools → **Application → Clear site data** でサイトデータを消去してから再読み込みする。
+
 
