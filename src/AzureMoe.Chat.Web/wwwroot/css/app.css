@@ -131,7 +131,7 @@ a.url:hover { color: #7eecea; }
 .line.ai > *:last-child, .line.ai-stream > *:last-child  { margin-bottom:0 !important; }
 
 /* Provisional streaming answer — dim + italic to signal in-progress */
-.line.ai-stream { color: var(--fg-dim); font-style: italic; }
+.line.ai-stream { opacity: 0.7; font-style: italic; }
 .line.ai-stream h1, .line.ai-stream h2, .line.ai-stream h3,
 .line.ai-stream h4, .line.ai-stream h5, .line.ai-stream h6,
 .line.ai-stream code, .line.ai-stream pre, .line.ai-stream pre code { font-style: normal; }
