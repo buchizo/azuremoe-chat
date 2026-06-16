@@ -4,6 +4,7 @@
 @inject AssetLoader AssetLoader
 @inject RagInterop RagInterop
 @inject JsLlmEngine LlmEngine
+@inject LlmEngineRouter Router
 @inject RagPipeline Rag
 @inject AppConfig Cfg
 @implements IAsyncDisposable
@@ -17,8 +18,11 @@
   /_\   _____  _ _ ___   |  \/  |___  ___
  / _ \ |_ / || | '_/ -_) | |\/| / _ \/ -_)
 /_/ \_\/__/\_,_|_| \___| |_|  |_\___/\___|
-      Chat — powered by GraphRAG</pre>
-        <div class="splash-desc">GraphRAG + ブラウザ内 LLM</div>
+      </pre>
+        <div class="splash-desc">ブラウザ内でGraphDBとLLMを起動し、<a class="url" href="https://blog.azure.moe" target="_blank">blog.azure.moe</a> の内容を検索できる実験サイトです。<br />
+        WebGPUが利用可能な場合、LLMのロードに2 GB程度のGPUのVRAMとメインメモリが必要です。<br />
+        スマートフォンではたぶんクラッシュします。
+        </div>
         <button class="splash-accept" @onclick="AcceptAsync">Accept</button>
         <footer class="app-footer splash-footer">
             <a class="url" href="terms.html" target="_blank" rel="noopener">利用規約 (Terms of Use)</a>
@@ -82,6 +86,7 @@ else
     private bool   _accepted  = false;
     private bool   _ready     = false;
     private bool   _busy      = false;
+    private bool   _debugMode = false;
     private string? _thinking = null;   // transient "processing" status during a turn
     private ElementReference _terminalRef;
     private ElementReference _outputRef;
@@ -122,7 +127,6 @@ else
     private async Task RunStartupAsync()
     {
         Print("=== AzureMoe Chat ===", "title");
-        Print("GraphRAG + ブラウザ内 LLM", "dim");
         PrintBlank();
 
         try
@@ -216,7 +220,7 @@ else
         if (!_busy) return;
         _thinking = "停止しています…";
         StateHasChanged();
-        try { await LlmEngine.InterruptAsync(); } catch { }
+        try { await Router.InterruptAsync(); } catch { }
         if (!_cts.IsCancellationRequested) await _cts.CancelAsync();
     }
 
@@ -285,6 +289,14 @@ else
                         _streamBuf.Clear();
                         StateHasChanged();
                     },
+                    onDebug: _debugMode ? msg =>
+                    {
+                        // Insert a visual separator before each major processing step (▶ marker).
+                        if (msg.Contains(" ▶ "))
+                            Print("<hr />", "debug-hr");
+                        Print(EscapeHtml(msg), "debug");
+                        StateHasChanged();
+                    } : null,
                     ct: _cts.Token);
 
                 _thinking = null;
@@ -342,8 +354,13 @@ else
             case "history":
                 Print($"履歴: {_history.Count / 2} ターン", "info");
                 break;
-            case "model":
-                if (LlmEngine.IsLoaded && LlmEngine.Device == "built-in")
+            case "info":
+                if (Router.IsHttpMode)
+                {
+                    var mdlLabel = Router.HttpModel is not null ? $" / model: {Router.HttpModel}" : "";
+                    Print($"LLM     : {EscapeHtml(Router.HttpEndpoint ?? "")}{EscapeHtml(mdlLabel)}  [http]", "info");
+                }
+                else if (LlmEngine.IsLoaded && LlmEngine.Device == "built-in")
                 {
                     Print($"LLM     : Chrome 組み込み AI (Gemini Nano)  [読み込み済み / built-in]", "info");
                 }
@@ -354,6 +371,25 @@ else
                 }
                 Print($"埋め込み: {Cfg.EmbeddingModelId}", "info");
                 Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
+                if (_debugMode)    Print("デバッグ  : ON", "info");
+                if (Router.IsHttpMode)
+                {
+                    var ep  = EscapeHtml(Router.HttpEndpoint ?? "");
+                    var mdl = Router.HttpModel is not null ? $" ({EscapeHtml(Router.HttpModel)})" : "";
+                    Print($"HTTP LLM  : {ep}{mdl}", "info");
+                }
+                if (_debugMode)
+                {
+                    // Show which AppConfig values are actually in effect for this session.
+                    var topK    = Router.IsHttpMode ? Cfg.RagTopK         : Cfg.LocalRagTopK;
+                    var maxCtx  = Router.IsHttpMode ? Cfg.MaxContextChars  : Cfg.LocalMaxContextChars;
+                    var perRef  = Router.IsHttpMode ? 2500                 : Cfg.LocalPerRefMaxChars;
+                    Print($"[debug] 参照件数上限  : {topK}", "debug");
+                    Print($"[debug] コンテキスト上限: {maxCtx} 文字", "debug");
+                    Print($"[debug] 参照1件上限   : {perRef} 文字", "debug");
+                    Print($"[debug] 履歴ターン数  : {Cfg.HistoryTurns}", "debug");
+                    Print($"[debug] GroundingCheck: {Cfg.VerifyGrounding}", "debug");
+                }
                 break;
             case "reload":
                 _lines.Clear();
@@ -361,10 +397,30 @@ else
                 // Unload loaded models first so reload truly starts fresh,
                 // rather than re-using the already-loaded LLM/RAG worker.
                 _ready = false;
+                Router.UseLocal();
                 await LlmEngine.UnloadAsync(_cts.Token);
                 await RagInterop.UnloadAsync(_cts.Token);
                 await RunStartupAsync();
                 return;
+            case "debug":
+                _debugMode = arg == "on";
+                Print($"デバッグモード: {(_debugMode ? "ON" : "OFF")}", "info");
+                break;
+            case "llm":
+                if (string.IsNullOrWhiteSpace(arg))
+                {
+                    Router.UseLocal();
+                    Print("ローカルLLMを使用します", "info");
+                }
+                else
+                {
+                    var llmParts = arg.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                    var ep  = llmParts[0];
+                    var mdl = llmParts.Length > 1 ? llmParts[1] : null;
+                    Router.UseHttp(ep, mdl);
+                    Print($"HTTP LLM: {EscapeHtml(ep)}{(mdl is not null ? $" ({EscapeHtml(mdl)})" : "")}", "info");
+                }
+                break;
             default:
                 Print($"不明なコマンド: /{cmd}  (/help で一覧)", "warn");
                 break;
@@ -396,8 +452,9 @@ else
     {
         Print("コマンド:", "heading");
         Print("  /help     — このヘルプを表示", "dim");
-        Print("  /mode [fast|normal|deep] — 探索の深さを表示/変更", "dim");
-        Print("  /model    — 現在のモデル情報", "dim");
+        Print("  /mode [fast|normal] — 探索の深さを表示/変更", "dim");
+        Print("  /llm [endpoint [model]] — 外部 LLM エンドポイントを設定/解除", "dim");
+        Print("  /info     — 現在のモデル情報", "dim");
         Print("  /license  — ライセンス情報を表示", "dim");
         Print("  /clear    — 画面と会話履歴をクリア", "dim");
         Print("  /reload   — 再起動", "dim");
@@ -416,7 +473,7 @@ else
         if (string.IsNullOrWhiteSpace(arg))
         {
             Print($"現在の探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
-            Print("変更: /mode fast | /mode normal | /mode deep", "dim");
+            Print("変更: /mode fast | /mode normal", "dim");
             return;
         }
 
@@ -427,7 +484,7 @@ else
         }
         else
         {
-            Print($"不明なモード: {EscapeHtml(arg)}  (fast / normal / deep のいずれか)", "warn");
+            Print($"不明なモード: {EscapeHtml(arg)}  (fast / normal のいずれか)", "warn");
         }
     }
 
@@ -486,7 +543,7 @@ else
         for (var i = 0; i < sources.Count; i++)
         {
             var c    = sources[i];
-            var date = c.Date.Length >= 10 ? c.Date[..10] : c.Date;
+            var date = FormatDateJst(c.Date);
             Print($"<span class='rank'>[{i + 1}]</span> " +
                   $"<a class='url' href='{EscapeHtml(c.Url)}' target='_blank'>{EscapeHtml(c.Title)}</a>" +
                   $"  <span class='dim'>{date}</span>", "source");
@@ -499,6 +556,17 @@ else
 
     private static string EscapeHtml(string s) =>
         s.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;").Replace("\"", "&quot;");
+
+    private static readonly TimeZoneInfo _jst =
+        TimeZoneInfo.FindSystemTimeZoneById("Asia/Tokyo");
+
+    private static string FormatDateJst(string raw)
+    {
+        if (DateTimeOffset.TryParse(raw, out var dto))
+            return TimeZoneInfo.ConvertTime(dto, _jst).ToString("yyyy/MM/dd");
+        // fallback: ISO date prefix as-is
+        return raw.Length >= 10 ? raw[..10] : raw;
+    }
 
     private async Task FocusInputAsync()
     {

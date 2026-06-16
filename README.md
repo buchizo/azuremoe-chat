@@ -286,7 +286,8 @@ LadybugDB (WASM)・transformers.js をすべてブラウザ内で実行する。
 | 役割 | バックエンド | モデル / エンジン | 備考 |
 |---|---|---|---|
 | LLM (テキスト生成) | Chrome 組み込み AI | Gemini Nano | ダウンロード不要・最優先 |
-| LLM (テキスト生成) | transformers.js | `onnx-community/Qwen3.5-0.8B-ONNX-OPT` (q4) | Chrome AI 非対応時に自動ダウンロード |
+| LLM (テキスト生成) | transformers.js | `onnx-community/Qwen2.5-0.5B-Instruct` (q4) | Chrome AI 非対応時に自動ダウンロード |
+| LLM (テキスト生成) | OpenAI 互換 HTTP | 任意 (LM Studio / Ollama 等) | `/llm` コマンドで実行中に切替可 |
 | 埋め込み | transformers.js | `Xenova/multilingual-e5-small` | 起動時に自動ダウンロード |
 
 モデルは transformers.js が Hugging Face Hub からダウンロードし、Cache API で自動キャッシュする。
@@ -334,8 +335,7 @@ Chrome AI が使えない環境向けに `appsettings.json` で変更可能:
 
 | モデル | サイズ (q4) | 特徴 |
 |---|---|---|
-| `onnx-community/Qwen3.5-0.8B-ONNX-OPT` | ~500 MB | 高性能・最新 (デフォルト) |
-| `onnx-community/Qwen2.5-0.5B-Instruct` | ~350 MB | 軽量・高速 |
+| `onnx-community/Qwen2.5-0.5B-Instruct` | ~350 MB | 軽量・高速 (デフォルト) |
 | `onnx-community/Qwen2.5-1.5B-Instruct` | ~900 MB | 日本語品質が向上 |
 
 ### 前提条件
@@ -382,27 +382,29 @@ dotnet run --project src/AzureMoe.Chat.Web
 | `DbBaseUrl` | `data/` | DB ファイルのベース URL (manifest の `databaseFile` を結合) |
 | `LlmModelId` | `onnx-community/Qwen2.5-0.5B-Instruct` | LLM モデル ID (HuggingFace) |
 | `LlmDtype` | `q4` | 量子化精度。`q4` / `q8` / `fp16` など |
-| `LlmMaxNewTokens` | `4096` | 最終回答の最大生成トークン数 (上限。EOS で自然停止。発散時の暴走を抑えるため上限を設定) |
-| `LlmRewriteMaxTokens` | `512` | クエリ書き換え (Normal/Deep) の最大トークン数 |
+| `LlmMaxNewTokens` | `4096` | 最終回答の最大生成トークン数 (上限。EOS で自然停止) |
 | `LlmEvalMaxTokens` | `512` | 充足判定 (Deep) の最大トークン数 |
 | `EmbeddingModelId` | `Xenova/multilingual-e5-small` | 埋め込みモデル ID (HuggingFace) |
 | `RetrievalMode` | `Normal` | 探索の深さ。`Fast` / `Normal` / `Deep` (UI の `/mode` でも変更可) |
-| `RagTopK` | `6` | 最終参照数の基準値 (モード別に増減。再ランク＋足切り後の上限) |
-| `MaxContextChars` | `6000` | LLM に渡す文脈の最大文字数 |
-| `HistoryTurns` | `3` | LLM に渡す直近会話ターン数 (履歴に引っ張られないよう小さめ) |
+| `RagTopK` | `6` | HTTP LLM モード時の最終参照数上限 |
+| `MaxContextChars` | `6000` | HTTP LLM モード時に LLM へ渡す文脈の最大文字数 |
+| `LocalRagTopK` | `3` | ローカル WASM LLM モード時の参照数上限 (2B 級モデル向け圧縮設定) |
+| `LocalMaxContextChars` | `2500` | ローカル WASM LLM モード時の文脈最大文字数 |
+| `LocalPerRefMaxChars` | `800` | ローカル WASM LLM モード時の参照1件あたりの最大文字数 |
+| `HistoryTurns` | `3` | Deep モードで LLM に渡す直近会話ターン数 |
 | `DeepMaxRounds` | `3` | Deep モードの検索クエリ数 (round-0 ＋ 上位タイトルでの追検索) |
-| `VerifyGrounding` | `true` | 全モードで、生成後に「回答が参考情報で裏付けられるか」を検査し、不十分なら警告を表示 (短い LLM 呼び出しを1回追加) |
+| `VerifyGrounding` | `true` | 生成後に「回答が参考情報で裏付けられるか」を検査し、不十分なら警告を表示 |
 | `SystemPrompt` | (組み込み) | システムプロンプト (キャラ付け + GraphRAG ルール) |
 
 #### 探索モード (`RetrievalMode`)
 
 検索の深さと応答速度のトレードオフを選べる。UI の `/mode` で実行中にも切替可能。
 
-| モード | 検索の広さ | 内容 | 体感 |
-|---|---|---|---|
-| `Fast` | 狭 | グラフ探索なしの純ベクトル検索 | 最軽量 |
-| `Normal` | 中 | グラフ探索あり・履歴を踏まえたクエリ書き換え | バランス (既定) |
-| `Deep` | 広 | 関連エンティティまで辿る + 上位記事タイトルで決定的に追検索 (複数クエリ, 最大 `DeepMaxRounds`) | 高精度・低速 |
+| モード | 検索の広さ | 内容 | 会話履歴 | 体感 |
+|---|---|---|---|---|
+| `Fast` | 狭 | グラフ探索なし・純ベクトル検索 | 使用しない | 最軽量 |
+| `Normal` | 中 | グラフ探索あり | 使用しない (単発質問) | バランス (既定) |
+| `Deep` | 広 | 関連エンティティまで辿る + 上位記事タイトルで決定的に追検索 (複数クエリ, 最大 `DeepMaxRounds`) | 直近 `HistoryTurns` ターン | 高精度・低速 |
 
 **全モード共通の2段構え**:
 1. *recall* — モードに応じてベクトル＋グラフ＋日付で候補を広く集める。
@@ -429,8 +431,10 @@ dotnet run --project src/AzureMoe.Chat.Web
 |---|---|
 | `/help` | コマンド一覧を表示 |
 | `/mode [fast\|normal\|deep]` | 探索モードを表示 / 変更 (引数なしで現在値を表示) |
-| `/model` | 現在のモデル情報を表示 (探索モードも表示) |
-| `/history` | 会話履歴の件数を表示 |
+| `/llm [endpoint [model]]` | 外部 OpenAI 互換 LLM を設定 (例: `/llm http://localhost:1234/v1 gpt-model`)。引数なしでローカル WASM に戻す |
+| `/debug [on\|off]` | デバッグ出力の表示切替。ON 時は埋め込み・Cypher・LLM プロンプト/応答をチャット内に表示 |
+| `/info` | 現在の LLM / 埋め込みモデル情報と探索モードを表示 |
+| `/license` | ライセンス情報を表示 |
 | `/clear` | 画面と会話履歴をクリア |
 | `/reload` | アプリを再起動 |
 | (それ以外) | RAG クエリとして実行 |
@@ -442,7 +446,7 @@ dotnet run --project src/AzureMoe.Chat.Web
 ### 動作フロー
 
 1. 起動時: manifest.json 取得 → DB ダウンロード → LadybugDB WASM 初期化 → transformers.js モデル読み込み
-2. 質問入力時 (モードにより広さが変わる): クエリ解析 (日付・キーワード抽出) → ベクトル＋グラフ＋日付で候補を収集 → **元の質問への関連度で再ランク・足切り** → URL 単位でまとめてコンテキスト構築 → WebLLM でストリーミング生成 → 接地検査
+2. 質問入力時 (モードにより広さが変わる): クエリ解析 (日付・キーワード抽出) → ベクトル＋グラフ＋日付で候補を収集 → **元の質問への関連度で再ランク・足切り** → URL 単位でまとめてコンテキスト構築 (本文中の URL を除去して圧縮) → LLM でストリーミング生成 → 接地検査
 3. WebGPU 非対応環境: WASM CPU にフォールバックして生成 (低速)
 
 ---

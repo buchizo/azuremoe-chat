@@ -103,6 +103,9 @@
 .line.warn      { color: var(--orange); }
 .line.error     { color: var(--red); }
 .line.status    { color: var(--fg-dim); font-style: italic; }
+.line.debug     { color: var(--fg-dim); font-size: 0.85em; opacity: 0.75; }
+.line.debug-hr  { padding: 0; }
+.line.debug-hr hr { border: none; border-top: 1px solid var(--fg-dim); opacity: 0.3; margin: 4px 0; }
 .line.heading   { color: var(--purple); margin-top: 4px; }
 .line.user-input{ color: var(--blue); font-weight: bold; }
 .line.result, .line.result-url, .line.snippet, .line.source { color: var(--fg); }

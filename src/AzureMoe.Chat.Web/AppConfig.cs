@@ -64,6 +64,15 @@ public sealed class AppConfig
     // retrieved context; warn the user when it isn't. Costs one short LLM call.
     public bool   VerifyGrounding { get; set; } = true;
 
+    // ── Small-model context budget ──────────────────────────────────────────
+    // Local WASM LLMs (2B class) suffer from "lost in the middle": they attend
+    // mainly to the beginning and end of their context, missing chunks in the
+    // middle. Tighter budgets keep the relevant text within the model's effective
+    // attention range. HTTP mode (20B+) uses the standard values above.
+    public int    LocalRagTopK         { get; set; } = 3;    // references (vs 6 for HTTP)
+    public int    LocalMaxContextChars { get; set; } = 2500; // total chars  (vs 6000)
+    public int    LocalPerRefMaxChars  { get; set; } = 800;  // per-ref cap  (vs 2500)
+
     // System prompt. Persona ("あずも", an Azure-loving guide) + strict GraphRAG
     // answering rules. Override in wwwroot/appsettings.json. A calmer, less
     // moe alternative is kept in comments below for easy swapping.

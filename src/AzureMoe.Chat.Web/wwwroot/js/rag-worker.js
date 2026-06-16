@@ -23,6 +23,7 @@ let conn = null;
 let db   = null;
 let extractor = null;
 let _embeddingDevice = "unknown";
+let _debugLog = null; // string[] when debug is enabled, null otherwise
 
 // ── Utilities ──────────────────────────────────────────────────────────────
 
@@ -55,6 +56,7 @@ function runQuery(cypher) {
   }
   const rows = plain(r.getAllObjects());
   r.close();
+  if (_debugLog !== null) _debugLog.push(`[debug] [GraphDB]\n${cypher}\n→ ${rows.length} 件`);
   return rows;
 }
 
@@ -74,6 +76,8 @@ function runQueryWithVec(cypher, vec) {
   }
   const rows = plain(r.getAllObjects());
   r.close();
+  // Log query text but omit the embedding vector ($qv) since it is thousands of floats.
+  if (_debugLog !== null) _debugLog.push(`[debug] [GraphDB with $qv]\n${cypher}\n→ ${rows.length} 件`);
   return rows;
 }
 
@@ -212,6 +216,7 @@ async function loadEmbeddingPipeline(modelId, id) {
 
 async function embed(text) {
   if (!extractor) throw new Error("Embedding model not loaded");
+  if (_debugLog !== null) _debugLog.push(`[debug] [Embedding] "query: ${text}"`);
   const out = await extractor("query: " + text, { pooling: "mean", normalize: true });
   const vec = Array.from(out.data);
   const badIdx = vec.findIndex(v => !Number.isFinite(v));
@@ -396,6 +401,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       if (!conn || !extractor) throw new Error("Not initialised — call init first");
 
       const { userQuery, searchQuery, origQ, searchQ, mode, config: opt } = payload;
+      _debugLog = opt.debug ? [] : null;
 
       const _t0 = performance.now();
       const searchVec = await embed(searchQuery);
@@ -419,7 +425,9 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         ` total:${(_t3 - _t0).toFixed(0)}ms`
       );
 
-      self.postMessage({ id, type: "done", payload: { chunks } });
+      const debugLog = _debugLog ?? [];
+      _debugLog = null;
+      self.postMessage({ id, type: "done", payload: { chunks, debugLog } });
 
     } else if (type === "dispose") {
       // Graceful shutdown: release ONNX WebGPU session before the worker is

@@ -20,14 +20,14 @@ builder.Services.AddScoped(sp =>
 builder.Services.AddScoped<AssetLoader>();
 builder.Services.AddScoped<RagInterop>();
 builder.Services.AddScoped<JsLlmEngine>();
+builder.Services.AddScoped<HttpLlmEngine>();
+builder.Services.AddScoped<LlmEngineRouter>();
+builder.Services.AddScoped<ILlmEngine>(sp => sp.GetRequiredService<LlmEngineRouter>());
 builder.Services.AddSingleton<QueryAnalyzer>();
 builder.Services.AddScoped<RagPipeline>(sp => new RagPipeline(
     sp.GetRequiredService<RagInterop>(),
     sp.GetRequiredService<QueryAnalyzer>(),
-    sp.GetRequiredService<JsLlmEngine>(),
+    sp.GetRequiredService<ILlmEngine>(),
     sp.GetRequiredService<AppConfig>()));
-
-// Register ILlmEngine so RagPipeline can inject it
-builder.Services.AddScoped<ILlmEngine>(sp => sp.GetRequiredService<JsLlmEngine>());
 
 await builder.Build().RunAsync();

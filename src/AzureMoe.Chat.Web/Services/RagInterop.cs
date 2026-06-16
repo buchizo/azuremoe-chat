@@ -77,7 +77,9 @@ public sealed class RagInterop : IAsyncDisposable
     }
 
     /// <summary>Run the full retrieval pipeline in the worker.
-    /// Returns ranked <see cref="ChunkResult"/> list ready for context building.</summary>
+    /// Returns ranked <see cref="ChunkResult"/> list ready for context building.
+    /// When <paramref name="onDebug"/> is non-null, debug entries from the worker
+    /// (embed text, Cypher queries, result counts) are forwarded to it.</summary>
     public async ValueTask<IReadOnlyList<ChunkResult>> RetrieveAsync(
         string userQuery,
         string searchQuery,
@@ -85,6 +87,7 @@ public sealed class RagInterop : IAsyncDisposable
         AnalyzedQuery searchQ,
         RetrievalOptions opt,
         RetrievalMode mode,
+        Action<string>? onDebug = null,
         CancellationToken ct = default)
     {
         if (!_initialised) throw new InvalidOperationException("RagInterop not initialised");
@@ -106,10 +109,16 @@ public sealed class RagInterop : IAsyncDisposable
                 expansionLimit = opt.ExpansionLimit,
                 dateOverFetch  = opt.DateOverFetch,
                 deepMaxRounds  = _cfg.DeepMaxRounds,
+                debug          = onDebug is not null,
             },
         };
 
         var result = await m.InvokeAsync<JsonElement>("retrieveChunks", ct, payload);
+
+        if (onDebug is not null && result.TryGetProperty("debugLog", out var dl))
+            foreach (var e in dl.EnumerateArray())
+                onDebug(e.GetString() ?? "");
+
         return ParseChunks(result);
     }
 
