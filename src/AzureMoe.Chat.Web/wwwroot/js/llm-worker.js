@@ -11,16 +11,9 @@
 // and by keeping GPU buffers small (trimmed history + bounded max tokens).
 import { env, pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4.2.0";
 
-// In production the page is cross-origin isolated (coi-serviceworker sets COEP
-// for SharedArrayBuffer), which blocks direct cross-origin downloads from
-// huggingface.co with a CORS error. Route model fetches through our same-origin
-// Worker proxy (/hf/* → huggingface.co) so they bypass CORS/COEP. Local dev
-// talks to HF directly — the /hf route only exists on the deployed Worker.
-const isLocalDev = self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
-if (!isLocalDev) {
-  env.remoteHost = self.location.origin;
-  env.remotePathTemplate = "hf/{model}/resolve/{revision}/";
-}
+// coi-serviceworker.js uses COEP "credentialless" (not "require-corp"), so
+// cross-origin CORS fetches to huggingface.co are allowed without a proxy.
+// HuggingFace CDN returns Access-Control-Allow-Origin: * for public models.
 
 // Multi-threaded WASM needs SharedArrayBuffer, which requires cross-origin
 // isolation (provided by coi-serviceworker.js). When isolated, use most of the
@@ -166,7 +159,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
           },
         });
         initSession.destroy();
-        self.postMessage({ id, type: "loaded", payload: { device: activeDevice } });
+        self.postMessage({ id, type: "loaded", payload: { device: activeDevice, dtype: loadedDtype } });
         return;
       }
 
@@ -234,7 +227,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       }
       if (lastError) throw lastError;
 
-      self.postMessage({ id, type: "loaded", payload: { device: activeDevice } });
+      self.postMessage({ id, type: "loaded", payload: { device: activeDevice, dtype: loadedDtype } });
 
     // ── generate ──────────────────────────────────────────────────────────
     } else if (type === "generate") {

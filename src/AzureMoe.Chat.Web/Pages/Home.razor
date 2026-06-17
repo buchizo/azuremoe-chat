@@ -27,6 +27,7 @@
         <button class="splash-accept" @onclick="AcceptAsync">Accept</button>
         <footer class="app-footer splash-footer">
             <a class="url" href="terms.html" target="_blank" rel="noopener">利用規約 (Terms of Use)</a>
+            <a class="url" href="https://github.com/buchizo/azuremoe-chat" target="_blank" rel="noopener">GitHub</a>
             <span class="copyright">© 2026 kosmos.ebi</span>
         </footer>
     </div>
@@ -70,6 +71,7 @@ else
     }
     <footer class="app-footer terminal-footer">
         <a class="url" href="terms.html" target="_blank" rel="noopener">利用規約 (Terms of Use)</a>
+        <a class="url" href="https://github.com/buchizo/azuremoe-chat" target="_blank" rel="noopener">GitHub</a>
         <span class="copyright">© 2026 kosmos.ebi</span>
     </footer>
 </div>
@@ -408,7 +410,10 @@ else
                 else
                 {
                     var llmStatus = LlmEngine.IsLoaded ? $"[{LlmEngine.Device}]" : "[未読み込み]";
-                    Print($"LLM     : {Cfg.LlmModelId} ({Cfg.LlmDtype})  {llmStatus}", "info");
+                    var dtypeInfo = LlmEngine.LoadedDtype is string ld && ld != Cfg.LlmDtype
+                        ? $"{ld} ← {Cfg.LlmDtype} からフォールバック"
+                        : LlmEngine.LoadedDtype ?? Cfg.LlmDtype;
+                    Print($"LLM     : {Cfg.LlmModelId} ({dtypeInfo})  {llmStatus}", "info");
                 }
                 Print($"埋め込み: {Cfg.EmbeddingModelId}", "info");
                 Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
@@ -542,7 +547,7 @@ else
         // ── This app ──
         Print("● 本アプリ (AzureMoe Chat)", "heading");
         Print("  MIT License — Copyright (c) 2026 kosmos.ebi", "info");
-        Print("  " + Link("LICENSE", "LICENSE 全文 (リポジトリルート)"), "source");
+        Print("  " + Link("https://github.com/buchizo/azuremoe-chat", "GitHub リポジトリ (buchizo/azuremoe-chat)"), "source");
         PrintBlank();
 
         // ── LLM model ──

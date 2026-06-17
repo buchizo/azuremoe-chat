@@ -6,6 +6,8 @@ public interface ILlmEngine
 {
     /// <summary>"webgpu", "wasm", or null if not yet loaded.</summary>
     string? Device { get; }
+    /// <summary>Actual dtype loaded after fallback (e.g. "q8" even if "q4" was requested).</summary>
+    string? LoadedDtype { get; }
     bool IsLoaded { get; }
 
     ValueTask LoadAsync(string modelId, string dtype = "q4",

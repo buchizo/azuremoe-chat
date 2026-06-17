@@ -16,8 +16,9 @@ public sealed class HttpLlmEngine : ILlmEngine
     public string? Endpoint { get; private set; }
     public string? Model    { get; private set; }
 
-    public string? Device   => Endpoint is not null ? "http" : null;
-    public bool    IsLoaded => Endpoint is not null;
+    public string? Device      => Endpoint is not null ? "http" : null;
+    public string? LoadedDtype => null;
+    public bool    IsLoaded    => Endpoint is not null;
 
     public HttpLlmEngine(HttpClient http) => _http = http;
 

@@ -38,8 +38,9 @@ public sealed class LlmEngineRouter : ILlmEngine
 
     // ── ILlmEngine: delegated to _current ──────────────────────────────────
 
-    public string? Device   => _current.Device;
-    public bool    IsLoaded => _current.IsLoaded;
+    public string? Device      => _current.Device;
+    public string? LoadedDtype => _current.LoadedDtype;
+    public bool    IsLoaded    => _current.IsLoaded;
 
     // LoadAsync / UnloadAsync always target the JS engine so startup still works
     // regardless of which mode is active.

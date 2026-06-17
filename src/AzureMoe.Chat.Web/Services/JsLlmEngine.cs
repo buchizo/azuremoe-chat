@@ -20,7 +20,8 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
     private Func<string, ValueTask>?            _onToken;
     private bool? _builtinAiAvailable;
 
-    public string? Device   { get; private set; }
+    public string? Device      { get; private set; }
+    public string? LoadedDtype { get; private set; }
     public bool    IsLoaded => Device is not null;
 
     public JsLlmEngine(IJSRuntime js, NavigationManager nav, AppConfig cfg)
@@ -68,7 +69,8 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         await m.InvokeVoidAsync("createLlmWorker", ct, workerUrl);
 
         var result = await m.InvokeAsync<JsonElement>("loadLlmModel", ct, modelId, dtype, _loadRef);
-        Device = result.TryGetProperty("device", out var d) ? d.GetString() : "wasm";
+        Device      = result.TryGetProperty("device", out var d) ? d.GetString() : "wasm";
+        LoadedDtype = result.TryGetProperty("dtype",  out var t) ? t.GetString() : dtype;
     }
 
     public async ValueTask ChatAsync(
@@ -133,7 +135,8 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         }
         _chatRef?.Dispose();
         _chatRef = null;
-        Device   = null;   // IsLoaded → false
+        Device      = null;   // IsLoaded → false
+        LoadedDtype = null;
     }
 
     [JSInvokable]

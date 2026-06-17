@@ -1,0 +1,37 @@
+{
+  "navigationFallback": {
+    "rewrite": "/index.html",
+    "exclude": [
+      "/_framework/*",
+      "/js/*",
+      "/css/*",
+      "/lib/*",
+      "/data/*",
+      "/licenses/*",
+      "/*.ico",
+      "/*.json",
+      "/*.js",
+      "/*.css",
+      "/*.html"
+    ]
+  },
+  "routes": [
+    {
+      "route": "/lib/*",
+      "headers": {
+        "Cache-Control": "public, max-age=86400, stale-while-revalidate=604800"
+      }
+    },
+    {
+      "route": "/js/*",
+      "headers": {
+        "Cache-Control": "no-store"
+      }
+    }
+  ],
+  "mimeTypes": {
+    ".wasm": "application/wasm",
+    ".dat": "application/octet-stream",
+    ".blat": "application/octet-stream"
+  }
+}

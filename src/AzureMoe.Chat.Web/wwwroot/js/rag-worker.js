@@ -6,14 +6,10 @@
 import lbug from "../lib/ladybug/index.js";
 import { pipeline, env } from "https://esm.sh/@huggingface/transformers@4";
 
-// HF proxy: production is cross-origin isolated (COEP credentialless via
-// coi-serviceworker). Route model fetches through the same-origin /hf proxy so
-// they bypass CORS/COEP. Localhost dev talks to HF directly.
-const isLocalDev = self.location.hostname === "localhost" || self.location.hostname === "127.0.0.1";
-if (!isLocalDev) {
-  env.remoteHost = self.location.origin;
-  env.remotePathTemplate = "hf/{model}/resolve/{revision}/";
-}
+// coi-serviceworker.js uses COEP "credentialless" (not "require-corp"), so
+// cross-origin CORS fetches to huggingface.co are allowed without a proxy.
+// HuggingFace CDN returns Access-Control-Allow-Origin: * for public models.
+
 // Single-threaded WASM avoids the SharedArrayBuffer multi-thread path that
 // produced degenerate vectors in earlier builds. WebGPU is attempted first.
 env.backends.onnx.wasm.numThreads = 1;
@@ -245,7 +241,7 @@ async function loadEmbeddingPipeline(modelId, id) {
   // multilingual-e5-small on WASM is fast enough (~50-150 ms/call) so we skip WebGPU
   // here; WebGPU is still used for the LLM in llm-worker.js where the gain is larger.
   const p = await pipeline("feature-extraction", modelId, {
-    dtype: "fp32",
+    dtype: "q8",
     device: "wasm",
     progress_callback: progressCb,
   });

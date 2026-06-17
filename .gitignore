@@ -492,6 +492,7 @@ $RECYCLE.BIN/
 *.swp
 
 # Local artifacts
+src/**/*.zip
 poc/**/node_modules/
 poc/**/*.lbdb
 *.onnx
@@ -507,4 +508,10 @@ poc/poc3-embeddings/model/
 
 # Wrangler (Cloudflare) local state/cache
 .wrangler/
+
+# Azure Functions local settings (may contain connection strings)
+local.settings.json
+
+# Azure Static Web Apps CLI state
+.azure/
 
