@@ -88,12 +88,15 @@ public sealed class HttpLlmEngine : ILlmEngine
         }
         catch (Exception ex) when (!linked.IsCancellationRequested)
         {
-            // "TypeError: Failed to fetch" in Blazor WASM means a network-level failure
-            // (typically CORS preflight blocked). Wrap with actionable guidance.
+            // http:// endpoint from an https:// page → Mixed Content block (browser drops the
+            // request before it even reaches the server; CORS settings are irrelevant).
+            // https:// endpoint → likely a CORS preflight failure.
+            var hint = Endpoint?.StartsWith("http://", StringComparison.OrdinalIgnoreCase) == true
+                ? "HTTPS のページから http:// エンドポイントへの接続はブラウザの Mixed Content ポリシーによりブロックされます。" +
+                  "ローカルで使うには http:// でアプリを開いてください（開発サーバー: dotnet run → http://localhost:5001）。"
+                : "CORS が有効になっているか確認してください（LM Studio: サーバー設定 → Allow CORS / Ollama: OLLAMA_ORIGINS 環境変数）。";
             throw new InvalidOperationException(
-                $"LLM エンドポイント ({Endpoint}) への接続に失敗しました。" +
-                "CORS が有効になっているか確認してください（LM Studio: サーバー設定 → Allow CORS / Ollama: OLLAMA_ORIGINS 環境変数）。" +
-                $" 詳細: {ex.Message}", ex);
+                $"LLM エンドポイント ({Endpoint}) への接続に失敗しました。{hint} 詳細: {ex.Message}", ex);
         }
 
         using (response)

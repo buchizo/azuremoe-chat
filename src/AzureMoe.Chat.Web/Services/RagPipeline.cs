@@ -54,6 +54,15 @@ public sealed class RagPipeline
         void Status(string s) => onStatus?.Invoke(s);
         void Debug(string s)  => onDebug?.Invoke(s);
 
+        // RAG worker not initialized (e.g. mobile device where loading is skipped).
+        if (!_ragInterop.IsInitialised)
+        {
+            onCompleted?.Invoke(
+                "RAG が起動していないため検索できません。\n" +
+                "外部 LLM を使う場合は /llm コマンドでエンドポイントを設定できます。");
+            return [];
+        }
+
         var trimmed = TrimHistory(history);
 
         IReadOnlyList<ChatMessage> generationHistory =
@@ -76,6 +85,15 @@ public sealed class RagPipeline
         if (string.IsNullOrWhiteSpace(context))
         {
             onCompleted?.Invoke(NoContextMessage);
+            return references;
+        }
+
+        // LLM not loaded (e.g. mobile device where loading is skipped to avoid OOM).
+        if (!_llm.IsLoaded)
+        {
+            onCompleted?.Invoke(
+                "LLM が起動していないため回答は生成されません。下の参考記事をご参照ください。\n" +
+                "外部 LLM を使う場合は /llm コマンドでエンドポイントを設定できます。");
             return references;
         }
 

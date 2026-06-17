@@ -1,6 +1,7 @@
 ﻿@page "/"
 @using AzureMoe.Chat.Web.Services
 @inject IJSRuntime JS
+@inject NavigationManager Nav
 @inject AssetLoader AssetLoader
 @inject RagInterop RagInterop
 @inject JsLlmEngine LlmEngine
@@ -21,7 +22,7 @@
       </pre>
         <div class="splash-desc">ブラウザ内でGraphDBとLLMを起動し、<a class="url" href="https://blog.azure.moe" target="_blank">blog.azure.moe</a> の内容を検索できる実験サイトです。<br />
         WebGPUが利用可能な場合、LLMのロードに2 GB程度のGPUのVRAMとメインメモリが必要です。<br />
-        スマートフォンではたぶんクラッシュします。
+        スマートフォンではメモリ制約により DB・AI モデルの読み込みをスキップします。
         </div>
         <button class="splash-accept" @onclick="AcceptAsync">Accept</button>
         <footer class="app-footer splash-footer">
@@ -87,6 +88,7 @@ else
     private bool   _ready     = false;
     private bool   _busy      = false;
     private bool   _debugMode = false;
+    private bool   _isMobile  = false;
     private string? _thinking = null;   // transient "processing" status during a turn
     private ElementReference _terminalRef;
     private ElementReference _outputRef;
@@ -104,13 +106,32 @@ else
 
     // ── Lifecycle ───────────────────────────────────────────────────────────
 
+    protected override void OnInitialized()
+    {
+        // Auto-configure HTTP LLM from URL query params before first render.
+        // Usage: ?llm=https://endpoint[&model=model-name]
+        var query = new Uri(Nav.Uri).Query;
+        if (string.IsNullOrEmpty(query)) return;
+        string? ep = null, mdl = null;
+        foreach (var seg in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var i = seg.IndexOf('=');
+            if (i < 0) continue;
+            var k = Uri.UnescapeDataString(seg[..i]).ToLowerInvariant();
+            var v = Uri.UnescapeDataString(seg[(i + 1)..]);
+            if (k == "llm")   ep  = v;
+            if (k == "model") mdl = v;
+        }
+        if (!string.IsNullOrWhiteSpace(ep)) Router.UseHttp(ep, mdl);
+    }
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        // Startup no longer runs automatically: the splash screen gates it behind
-        // an explicit Accept click (see AcceptAsync). firstRender therefore does
-        // nothing here — the boot sequence begins only once the user accepts.
         if (firstRender)
+        {
+            try { _isMobile = await JS.InvokeAsync<bool>("isMobileDevice"); } catch { }
             return;
+        }
         // Auto-scroll to bottom after every render (streaming tokens, new lines, etc.)
         try { await JS.InvokeVoidAsync("scrollElementToBottom", _outputRef); } catch { }
     }
@@ -157,32 +178,52 @@ else
             dbBytes = await AssetLoader.LoadDbAsync(manifest, dbProg, _cts.Token);
             Print($"DB {(dbFromCache ? "キャッシュ読み込み" : "ダウンロード")}完了 ({dbBytes.Length / 1024:N0} KB)", "ok");
 
-            // ── Step 3: RAG worker init (DB + embedding model) ──
-            Status("GraphDB + 埋め込みモデルを初期化中...");
-            var ragProg = new Progress<(string Stage, string File, int Pct)>(t =>
+            // ── Step 3: RAG worker init ──
+            // On mobile, skip the embedding model (~120 MB WASM) to avoid OOM.
+            // Retrieval falls back to keyword search against post titles and tags.
+            if (_isMobile)
             {
-                var label = t.Stage == "db" ? "GraphDB" : "埋め込みモデル";
-                Status($"{label}: {t.File} {t.Pct}%");
-            });
-            await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, ragProg, _cts.Token);
-            Print("GraphDB + 埋め込みモデル準備完了", "ok");
-
-            // ── Step 4: LLM preload ──
-            var hasBuiltinAi = await LlmEngine.CheckBuiltinAiAsync(_cts.Token);
-            if (hasBuiltinAi)
-            {
-                Status("LLM を初期化中 (Chrome 組み込み AI)...");
-                await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, null, _cts.Token);
+                Status("GraphDB を初期化中 (キーワード検索モード)...");
+                var ragProgMobile = new Progress<(string Stage, string File, int Pct)>(t =>
+                    Status($"GraphDB: {t.File} {t.Pct}%"));
+                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, ragProgMobile,
+                    skipEmbedding: true, _cts.Token);
+                Print("GraphDB 準備完了（キーワード検索モード）", "ok");
+                if (Router.IsHttpMode)
+                    Print($"HTTP LLM: {EscapeHtml(Router.HttpEndpoint ?? "")}  (/llm で変更)", "ok");
+                else
+                    Print("LLM はメモリ制約によりスキップしました。外部 LLM: /llm [endpoint] [model]", "warn");
             }
             else
             {
-                Status($"LLM をダウンロード中 ({Cfg.LlmModelId})...");
-                var llmProg = new Progress<(string Text, int Pct)>(t =>
-                    Status($"LLM: {t.Text}  {t.Pct}%"));
-                await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, llmProg, _cts.Token);
-                Status($"LLM: {Cfg.LlmModelId}  100%");
+                Status("GraphDB + 埋め込みモデルを初期化中...");
+                var ragProg = new Progress<(string Stage, string File, int Pct)>(t =>
+                {
+                    var label = t.Stage == "db" ? "GraphDB" : "埋め込みモデル";
+                    Status($"{label}: {t.File} {t.Pct}%");
+                });
+                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, ragProg, ct: _cts.Token);
+                Print("GraphDB + 埋め込みモデル準備完了", "ok");
+
+                // ── Step 4: LLM preload ──
+                var hasBuiltinAi = await LlmEngine.CheckBuiltinAiAsync(_cts.Token);
+                if (hasBuiltinAi)
+                {
+                    Status("LLM を初期化中 (Chrome 組み込み AI)...");
+                    await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, null, _cts.Token);
+                }
+                else
+                {
+                    Status($"LLM をダウンロード中 ({Cfg.LlmModelId})...");
+                    var llmProg = new Progress<(string Text, int Pct)>(t =>
+                        Status($"LLM: {t.Text}  {t.Pct}%"));
+                    await LlmEngine.LoadAsync(Cfg.LlmModelId, Cfg.LlmDtype, llmProg, _cts.Token);
+                    Status($"LLM: {Cfg.LlmModelId}  100%");
+                }
+                Print($"LLM 準備完了  [{LlmEngine.Device}]", "ok");
+                if (Router.IsHttpMode)
+                    Print($"HTTP LLM を使用します: {EscapeHtml(Router.HttpEndpoint ?? "")}  (/llm で変更)", "info");
             }
-            Print($"LLM 準備完了  [{LlmEngine.Device}]", "ok");
 
             Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}  (/mode で変更)", "info");
 

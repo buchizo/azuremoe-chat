@@ -43,6 +43,7 @@ public sealed class RagInterop : IAsyncDisposable
     private DotNetObjectReference<RagInterop>? _dotnetRef;
     private IProgress<(string Stage, string File, int Pct)>? _progress;
     private bool _initialised;
+    public  bool IsInitialised => _initialised;
 
     public RagInterop(IJSRuntime js, NavigationManager nav, AppConfig cfg)
     {
@@ -58,11 +59,14 @@ public sealed class RagInterop : IAsyncDisposable
     }
 
     /// <summary>Load the DB bytes and embedding model into the worker.
-    /// Reports progress via <paramref name="progress"/> with stage "db" or "embedding".</summary>
+    /// Reports progress via <paramref name="progress"/> with stage "db" or "embedding".
+    /// When <paramref name="skipEmbedding"/> is true, only the DB is loaded and
+    /// retrieval falls back to keyword search (for memory-constrained devices).</summary>
     public async ValueTask InitAsync(
         byte[] dbBytes,
         string embeddingModelId,
         IProgress<(string Stage, string File, int Pct)>? progress = null,
+        bool skipEmbedding = false,
         CancellationToken ct = default)
     {
         _progress  = progress;
@@ -72,7 +76,7 @@ public sealed class RagInterop : IAsyncDisposable
         var m = await GetModuleAsync();
         var workerUrl = _nav.BaseUri.TrimEnd('/') + "/js/rag-worker.js";
         await m.InvokeVoidAsync("createRagWorker", ct, workerUrl);
-        await m.InvokeAsync<object>("initRag", ct, dbBytes, embeddingModelId, _dotnetRef);
+        await m.InvokeAsync<object>("initRag", ct, dbBytes, embeddingModelId, _dotnetRef, skipEmbedding);
         _initialised = true;
     }
 

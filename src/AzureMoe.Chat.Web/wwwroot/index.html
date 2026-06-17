@@ -34,5 +34,6 @@
   </div>
   <script src="_framework/blazor.webassembly#[.{fingerprint}].js"></script>
   <script>window.scrollElementToBottom = e => { if (e) e.scrollTop = e.scrollHeight; };</script>
+  <script>window.isMobileDevice = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));</script>
 </body>
 </html>

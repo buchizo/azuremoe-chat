@@ -1,4 +1,4 @@
-/* Scoped styles for Home.razor — terminal-style chat UI.
+﻿/* Scoped styles for Home.razor — terminal-style chat UI.
    NOTE: styles targeting MarkupString-injected markdown elements
          (headings, lists, code, etc.) live in app.css because
          Blazor scoped CSS cannot match them (no scope attribute). */
@@ -28,6 +28,8 @@
 .splash-desc {
     color: var(--fg-dim);
     font-size: 12px;
+    margin-left: 15px;
+    margin-right: 15px;
 }
 
 .splash-accept {
@@ -177,6 +179,11 @@
 
 .chat-input::placeholder { color: var(--fg-dim); }
 .chat-input:disabled     { opacity: .5; cursor: wait; }
+
+/* iOS Safari zooms in on focus when font-size < 16px. Fix for touch devices only. */
+@media (pointer: coarse) {
+    .chat-input { font-size: 16px; }
+}
 
 /* ── Emergency stop button (shown while a turn is running) ───────────────── */
 .stop-btn {

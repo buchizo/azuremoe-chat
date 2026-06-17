@@ -443,6 +443,36 @@ dotnet run --project src/AzureMoe.Chat.Web
 (緊急停止)。途中まで生成された回答は残る。長い生成 (`LlmMaxNewTokens` が大きい) や、まれに小型モデルが
 同じ文言を繰り返すループに入った場合の保険として使える (ループ自体は `no_repeat_ngram_size` で抑制済み)。
 
+### URL パラメータ
+
+URL に以下のクエリパラメータを付けると、ページを開いた時点から `/llm` モードが有効になる。
+`/llm` コマンドによる手動設定と同じ効果。
+
+| パラメータ | 必須 | 説明 |
+|---|---|---|
+| `llm` | 必須 | OpenAI 互換エンドポイントの URL |
+| `model` | 任意 | モデル名。省略時はエンドポイント側のデフォルト |
+
+```
+# LM Studio
+https://chat.azure.moe/?llm=http://localhost:1234/v1&model=qwen3-8b
+
+# Ollama
+https://chat.azure.moe/?llm=http://localhost:11434/v1&model=qwen3:8b
+
+# OpenAI 互換 API
+https://chat.azure.moe/?llm=https://api.openai.com/v1&model=gpt-4o
+```
+
+> **スマートフォンでの利用**: iOS/Android ではメモリ制約によりローカル LLM・埋め込みモデルをスキップし、
+> GraphDB に対してキーワード検索のみ行うモードで起動する。
+> `?llm=...` を付けると外部 LLM との組み合わせで回答生成も可能になる。
+
+> **Mixed Content に注意**: デプロイ済みサイト (`https://`) から `http://localhost` への接続は
+> **ブラウザの Mixed Content ポリシーによりブロック**される (CORS 設定とは無関係)。
+> LM Studio / Ollama などローカルサーバーを使う場合は、開発用サーバー (`dotnet run`) 経由で
+> `http://localhost:5001` からアクセスするか、HTTPS に対応したリバースプロキシを用意すること。
+
 ### 動作フロー
 
 1. 起動時: manifest.json 取得 → DB ダウンロード → LadybugDB WASM 初期化 → transformers.js モデル読み込み

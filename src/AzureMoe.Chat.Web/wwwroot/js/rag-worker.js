@@ -92,6 +92,51 @@ function readChunk(row) {
   };
 }
 
+// ── Keyword search (no embedding required) ─────────────────────────────────
+
+// Simple keyword search against post titles and tag names.
+// Used on memory-constrained devices (mobile) where the embedding model is
+// skipped. Searches each keyword independently and deduplicates by chunk id.
+function keywordSearch(keywords, topK) {
+  if (keywords.length === 0) return [];
+  const seen = new Set();
+  const results = [];
+
+  function addRows(rows) {
+    for (const row of rows) {
+      const c = readChunk(row);
+      if (!c.cid || seen.has(c.cid)) continue;
+      seen.add(c.cid);
+      results.push(c);
+    }
+  }
+
+  for (const kw of keywords) {
+    if (results.length >= topK) break;
+    const escaped = esc(kw);
+    try {
+      addRows(runQuery(
+        `MATCH (p:Post)-[:HAS_CHUNK]->(c:Chunk)
+WHERE p.title CONTAINS '${escaped}'
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, 0.0 AS distance
+ORDER BY p.date DESC, c.ordinal ASC
+LIMIT ${topK}`));
+    } catch (e) { console.warn("[rag-worker] keyword title search error:", e?.message); }
+
+    if (results.length >= topK) break;
+    try {
+      addRows(runQuery(
+        `MATCH (t:Tag)<-[:TAGGED]-(p:Post)-[:HAS_CHUNK]->(c:Chunk)
+WHERE t.name CONTAINS '${escaped}'
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, 0.0 AS distance
+ORDER BY p.date DESC, c.ordinal ASC
+LIMIT ${topK}`));
+    } catch (e) { console.warn("[rag-worker] keyword tag search error:", e?.message); }
+  }
+
+  return results.slice(0, topK);
+}
+
 // ── Cypher query templates (ported from JsGraphStore.cs) ───────────────────
 
 function vectorSearch(vec, topK) {
@@ -394,11 +439,23 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
 
       self.postMessage({ id, type: "progress", payload: { stage: "db", file: "chat.db", pct: 100 } });
 
-      extractor = await loadEmbeddingPipeline(payload.embeddingModelId, id);
+      if (!payload.skipEmbedding) {
+        extractor = await loadEmbeddingPipeline(payload.embeddingModelId, id);
+      } else {
+        _embeddingDevice = "none";
+      }
       self.postMessage({ id, type: "inited", payload: { ok: true, device: _embeddingDevice } });
 
     } else if (type === "retrieve") {
-      if (!conn || !extractor) throw new Error("Not initialised — call init first");
+      if (!conn) throw new Error("Not initialised — call init first");
+
+      // No embedding model (skipEmbedding mode) — fall back to keyword search.
+      if (!extractor) {
+        const keywords = extractKeywordsFromTitle(payload.userQuery ?? "");
+        const chunks = keywordSearch(keywords, payload.config?.ragTopK ?? 5);
+        self.postMessage({ id, type: "done", payload: { chunks, debugLog: [] } });
+        return;
+      }
 
       const { userQuery, searchQuery, origQ, searchQ, mode, config: opt } = payload;
       _debugLog = opt.debug ? [] : null;
