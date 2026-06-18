@@ -14,6 +14,15 @@ if (args.Length > 0 && args[0].Equals("inspect", StringComparison.OrdinalIgnoreC
     return RunInspect(args[1..]);
 
 // ---------------------------------------------------------------------------
+// `append` subcommand — fetch one blog post from a URL and append it to an
+// existing .lbdb, copying the source DB to a dated output file first.
+//   dotnet run --project src/AzureMoe.Chat.Ingest -- append <url> <sourceDbPath>
+//   ... append <url> <sourceDbPath> [--OutDir <dir>] [--ModelDir <dir>] [--NoLlm] [--Override]
+// ---------------------------------------------------------------------------
+if (args.Length > 0 && args[0].Equals("append", StringComparison.OrdinalIgnoreCase))
+    return await RunAppendAsync(args[1..]);
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 var config = new ConfigurationBuilder()
@@ -28,11 +37,7 @@ config.Bind(opt);
 // Conventional env var names for LLM overrides.
 if (Environment.GetEnvironmentVariable("LLM_BASE_URL") is { } envUrl)   opt.LlmBaseUrl = envUrl;
 if (Environment.GetEnvironmentVariable("LLM_MODEL")    is { } envModel) opt.LlmModel   = envModel;
-opt.LlmApiKey         ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
-opt.R2AccountId       ??= Environment.GetEnvironmentVariable("R2_ACCOUNT_ID");
-opt.R2AccessKeyId     ??= Environment.GetEnvironmentVariable("R2_ACCESS_KEY_ID");
-opt.R2SecretAccessKey ??= Environment.GetEnvironmentVariable("R2_SECRET_ACCESS_KEY");
-opt.R2Bucket          ??= Environment.GetEnvironmentVariable("R2_BUCKET");
+opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -43,8 +48,6 @@ var dbFileName   = $"blog-{dateStamp}.lbdb";
 var dbPath       = Path.Combine(opt.OutDir, dbFileName);
 var manifestPath = Path.Combine(opt.OutDir, "manifest.json");
 
-var uploadEnabled = !opt.SkipR2 && opt.HasR2;
-
 Console.WriteLine($"XML ディレクトリ : {Path.GetFullPath(opt.XmlDir)}");
 Console.WriteLine($"出力先           : {Path.GetFullPath(opt.OutDir)}");
 Console.WriteLine($"DB               : {dbFileName}");
@@ -53,7 +56,6 @@ if (opt.NoLlm)
     Console.WriteLine($"LLM              : (スキップ)");
 else
     Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
-Console.WriteLine($"R2 アップロード  : {(uploadEnabled ? opt.R2Bucket : opt.SkipR2 ? "スキップ (--SkipR2)" : "なし (認証情報未設定)")}");
 Console.WriteLine();
 
 using var cts = new CancellationTokenSource();
@@ -185,24 +187,6 @@ try
     await File.WriteAllTextAsync(manifestPath, manifestJson, cts.Token);
     Console.WriteLine($"manifest.json 書き込み完了  ({dbBytes / 1024:N0} KB、SHA-256: {dbSha256[..12]}...)");
 
-    // -----------------------------------------------------------------------
-    // Step 7: Upload to R2 (optional, skipped with --SkipR2)
-    // -----------------------------------------------------------------------
-    if (uploadEnabled)
-    {
-        Console.WriteLine($"R2 へアップロード中 (バケット: {opt.R2Bucket})...");
-        using var uploader = new R2Uploader(
-            opt.R2AccountId!, opt.R2AccessKeyId!, opt.R2SecretAccessKey!, opt.R2Bucket!);
-        await uploader.UploadAsync(dbPath,       dbFileName,     "application/octet-stream", cts.Token);
-        Console.WriteLine($"  ✓ {dbFileName}");
-        await uploader.UploadAsync(manifestPath, "manifest.json", "application/json", cts.Token);
-        Console.WriteLine($"  ✓ manifest.json");
-    }
-    else
-    {
-        Console.WriteLine("(R2 アップロードをスキップ — ローカル出力のみ)");
-    }
-
     Console.WriteLine();
     Console.WriteLine("完了。");
     return 0;
@@ -220,6 +204,240 @@ catch (Exception ex)
     Console.Error.WriteLine();
     Console.Error.WriteLine(ex.ToString());
     return 1;
+}
+
+// ---------------------------------------------------------------------------
+// append subcommand implementation
+// ---------------------------------------------------------------------------
+static async Task<int> RunAppendAsync(string[] rest)
+{
+    // Parse positional args and flags
+    string? url = null, sourceDbPath = null;
+    bool overrideMode = false;
+    var configArgs = new List<string>();
+
+    for (int i = 0; i < rest.Length; i++)
+    {
+        if (rest[i].Equals("--Override", StringComparison.OrdinalIgnoreCase))
+        {
+            overrideMode = true;
+        }
+        else if (rest[i].StartsWith("--") && i + 1 < rest.Length && !rest[i + 1].StartsWith("--"))
+        {
+            // --Key value pair
+            configArgs.Add(rest[i]);
+            configArgs.Add(rest[++i]);
+        }
+        else if (rest[i].StartsWith("--"))
+        {
+            configArgs.Add(rest[i]);
+        }
+        else if (url == null)
+        {
+            url = rest[i];
+        }
+        else if (sourceDbPath == null)
+        {
+            sourceDbPath = rest[i];
+        }
+    }
+
+    if (url == null || sourceDbPath == null)
+    {
+        Console.Error.WriteLine("使用方法: append <url> <sourceDbPath> [--OutDir <dir>] [--ModelDir <dir>] [--NoLlm] [--Override] [LLM options]");
+        return 1;
+    }
+
+    // Bind options (reuse same config pattern as main mode)
+    var config = new ConfigurationBuilder()
+        .AddJsonFile("appsettings.json", optional: true)
+        .AddEnvironmentVariables()
+        .AddCommandLine(configArgs.ToArray())
+        .Build();
+    var opt = new IngestOptions();
+    config.Bind(opt);
+    if (Environment.GetEnvironmentVariable("LLM_BASE_URL") is { } envUrl)   opt.LlmBaseUrl = envUrl;
+    if (Environment.GetEnvironmentVariable("LLM_MODEL")    is { } envModel) opt.LlmModel   = envModel;
+    opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
+
+    Directory.CreateDirectory(opt.OutDir);
+    var dateStamp    = DateTime.UtcNow.ToString("yyyyMMdd");
+    var dbFileName   = $"blog-{dateStamp}.lbdb";
+    var dbPath       = Path.Combine(opt.OutDir, dbFileName);
+    var manifestPath = Path.Combine(opt.OutDir, "manifest.json");
+
+    Console.WriteLine($"URL              : {url}");
+    Console.WriteLine($"ソースDB         : {Path.GetFullPath(sourceDbPath)}");
+    Console.WriteLine($"出力DB           : {Path.GetFullPath(dbPath)}");
+    Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}");
+    Console.WriteLine($"上書きモード     : {(overrideMode ? "あり (--Override)" : "なし")}");
+    if (opt.NoLlm)
+        Console.WriteLine($"LLM              : (スキップ)");
+    else
+        Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
+    Console.WriteLine();
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        cts.Cancel();
+        Console.Error.WriteLine("\n中断しています...");
+    };
+
+    try
+    {
+        // -----------------------------------------------------------------------
+        // Step 1: Copy source DB to dated output file
+        // -----------------------------------------------------------------------
+        Console.Write("DB コピー中...");
+        if (!File.Exists(sourceDbPath))
+            throw new FileNotFoundException($"ソースDB が見つかりません: {sourceDbPath}");
+
+        var srcFull = Path.GetFullPath(sourceDbPath);
+        var dstFull = Path.GetFullPath(dbPath);
+        if (!srcFull.Equals(dstFull, StringComparison.OrdinalIgnoreCase))
+            File.Copy(sourceDbPath, dbPath, overwrite: true);
+        Console.WriteLine($" 完了 ({new FileInfo(dbPath).Length / 1024:N0} KB)");
+
+        // -----------------------------------------------------------------------
+        // Step 2: Fetch blog post from URL
+        // -----------------------------------------------------------------------
+        Console.Write("ブログ記事を取得中...");
+        var fetchedPost = await BlogPostFetcher.FetchAsync(url, cts.Token);
+        Console.WriteLine($" 完了: \"{fetchedPost.Title}\"");
+
+        // -----------------------------------------------------------------------
+        // Steps 3–8: Open DB, process, append — all inside a scoped block so the
+        // DB file is released before we try to open it for SHA-256 hashing.
+        // -----------------------------------------------------------------------
+        Post post;
+        List<Chunk> chunks;
+        int chunkCount, entityCount, serviceCount;
+        int embeddingDim;
+        long postCount, totalChunks, entityTotal, serviceTotal;
+
+        {
+            // Steps 3–4: check duplicate, assign IDs
+            using var appender = new GraphAppender(dbPath);
+
+            var existingPostId = appender.FindPostByUrl(url);
+            if (existingPostId.HasValue && !overrideMode)
+            {
+                Console.Error.WriteLine($"URL は既にDBに存在します (Post.id={existingPostId.Value})。--Override を指定すると上書きできます。");
+                return 1;
+            }
+            if (existingPostId.HasValue)
+            {
+                Console.Write($"既存 Post.id={existingPostId.Value} を削除中...");
+                appender.DeletePost(existingPostId.Value);
+                Console.WriteLine(" 完了");
+            }
+
+            var (nextPostId, nextChunkId) = appender.GetNextIds();
+            post = fetchedPost with { Id = nextPostId };
+            Console.WriteLine($"ID 割り当て: Post.id={post.Id}、Chunk 開始 id={nextChunkId}");
+
+            // Step 5: Chunk
+            Console.Write("チャンク分割中...");
+            var text   = Chunking.HtmlToText(post.Html);
+            var pieces = Chunking.SplitIntoChunks(text);
+            chunks = new List<Chunk>(pieces.Count);
+            for (var i = 0; i < pieces.Count; i++)
+                chunks.Add(new Chunk { Id = nextChunkId + i, PostId = post.Id, Ordinal = i, Text = pieces[i] });
+            Console.WriteLine($" {chunks.Count} チャンク");
+
+            // Step 6: Embed
+            Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク)...");
+            using var embedder = new E5Embedder(opt.ModelDir);
+            for (var i = 0; i < chunks.Count; i++)
+            {
+                cts.Token.ThrowIfCancellationRequested();
+                var embedInput = string.IsNullOrEmpty(post.Title) ? chunks[i].Text : $"{post.Title}\n\n{chunks[i].Text}";
+                chunks[i].Embedding = embedder.EmbedPassage(embedInput);
+            }
+            embeddingDim = embedder.Dimension > 0 ? embedder.Dimension : GraphSchema.EmbeddingDim;
+            Console.WriteLine($"  完了 (dim={embedder.Dimension})");
+
+            // Step 7: Extract entities + Azure service names (unless --NoLlm)
+            var extractions = new Dictionary<long, Extraction>();
+            if (!opt.NoLlm)
+            {
+                Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
+                Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
+                using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
+                for (var i = 0; i < chunks.Count; i++)
+                {
+                    cts.Token.ThrowIfCancellationRequested();
+                    try
+                    {
+                        extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
+                        extractions[chunks[i].Id] = new Extraction([], [], []);
+                    }
+                }
+                Console.WriteLine("  完了");
+            }
+
+            // Step 8: Append to DB
+            Console.WriteLine("グラフDB 追記中...");
+            (chunkCount, entityCount, serviceCount) = appender.Append(
+                post, chunks, extractions, msg => Console.WriteLine($"  {msg}"));
+            Console.WriteLine($"  完了: Chunk={chunkCount}, Entity={entityCount}, AzureService={serviceCount}");
+
+            (postCount, totalChunks, entityTotal, serviceTotal) = appender.GetCounts();
+        } // appender disposed here — DB file is released before SHA-256
+
+        // -----------------------------------------------------------------------
+        // Step 9: Recompute SHA-256 + update manifest
+        // -----------------------------------------------------------------------
+        var dbBytes = new FileInfo(dbPath).Length;
+        string dbSha256;
+        using (var sha = SHA256.Create())
+        await using (var fs = File.OpenRead(dbPath))
+        {
+            var hash = await sha.ComputeHashAsync(fs, cts.Token);
+            dbSha256 = Convert.ToHexString(hash).ToLowerInvariant();
+        }
+
+        var manifest = new Manifest
+        {
+            EngineVersion  = GraphSchema.EngineVersion,
+            EmbeddingModel = GraphSchema.EmbeddingModel,
+            EmbeddingDim   = embeddingDim,
+            DatabaseFile   = dbFileName,
+            DatabaseBytes  = dbBytes,
+            DatabaseSha256 = dbSha256,
+            PostCount      = (int)postCount,
+            ChunkCount     = (int)totalChunks,
+            EntityCount    = (int)entityTotal,
+            ServiceCount   = (int)serviceTotal,
+            BuiltAt        = DateTime.UtcNow.ToString("o"),
+        };
+        var manifestJson = JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true });
+        await File.WriteAllTextAsync(manifestPath, manifestJson, cts.Token);
+        Console.WriteLine($"manifest.json 更新完了  ({dbBytes / 1024:N0} KB、SHA-256: {dbSha256[..12]}...)");
+
+        Console.WriteLine();
+        Console.WriteLine("完了。");
+        return 0;
+    }
+    catch (OperationCanceledException)
+    {
+        Console.Error.WriteLine("中断されました。");
+        return 130;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"\nエラー: {ex.Message}");
+        if (ex.InnerException is { } inner)
+            Console.Error.WriteLine($"  詳細: {inner.Message}");
+        return 1;
+    }
 }
 
 // ---------------------------------------------------------------------------

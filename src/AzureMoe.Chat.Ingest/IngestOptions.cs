@@ -62,17 +62,4 @@ public sealed class IngestOptions
 
     /// <summary>Output directory for the built DB and manifest.</summary>
     public string OutDir { get; set; } = "out";
-
-    /// <summary>Skip R2 upload even when R2 credentials are configured.</summary>
-    public bool SkipR2 { get; set; }
-
-    // --- R2 (S3-compatible) upload. All optional; upload is skipped if unset. ---
-    public string? R2AccountId { get; set; }
-    public string? R2AccessKeyId { get; set; }
-    public string? R2SecretAccessKey { get; set; }
-    public string? R2Bucket { get; set; }
-
-    public bool HasR2 =>
-        !string.IsNullOrWhiteSpace(R2AccountId) && !string.IsNullOrWhiteSpace(R2AccessKeyId) &&
-        !string.IsNullOrWhiteSpace(R2SecretAccessKey) && !string.IsNullOrWhiteSpace(R2Bucket);
 }
