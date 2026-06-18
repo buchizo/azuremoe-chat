@@ -25,6 +25,13 @@ public static partial class Chunking
     [GeneratedRegex(@"<[^>]+>")]
     private static partial Regex Tags();
 
+    [GeneratedRegex(@"<h[23][^>]*>(.*?)</h[23]>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
+    private static partial Regex H2H3();
+
+    // STX (U+0002) — a control character that never appears in WordPress blog HTML.
+    // Used as a section-heading marker that survives HtmlToText's tag-stripping pass.
+    private const char SectionMarker = '\x02';
+
     [GeneratedRegex(@"[ \t\f\v\r]+")]
     private static partial Regex InlineWhitespace();
 
@@ -44,6 +51,60 @@ public static partial class Chunking
         s = InlineWhitespace().Replace(s, " ");
         s = BlankRuns().Replace(s, "\n\n");
         return s.Trim();
+    }
+
+    /// <summary>
+    /// Article-post variant: strips HTML, tracks H2/H3 headings, and splits into
+    /// chunks at paragraph boundaries (same size limits as <see cref="SplitIntoChunks"/>).
+    /// Each returned tuple carries the chunk text and the heading that preceded it.
+    /// </summary>
+    public static IReadOnlyList<(string Text, string SectionTitle)> SplitWithSections(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return [];
+
+        // Replace <h2>/<h3> elements with §heading§ markers before tag stripping.
+        var marked = H2H3().Replace(html, m =>
+        {
+            var inner   = Tags().Replace(m.Groups[1].Value, "");
+            var heading = System.Net.WebUtility.HtmlDecode(inner).Trim();
+            return $"\n{SectionMarker}{heading}{SectionMarker}\n";
+        });
+
+        var text  = HtmlToText(marked);
+        var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        var results        = new List<(string Text, string SectionTitle)>();
+        var current        = new StringBuilder();
+        var currentSection = "";
+
+        void Flush()
+        {
+            if (current.Length == 0) return;
+            var t = current.ToString().Trim();
+            if (t.Length > 0) results.Add((t, currentSection));
+            current.Clear();
+        }
+
+        foreach (var line in lines)
+        {
+            if (line.Length > 2 && line[0] == SectionMarker && line[^1] == SectionMarker)
+            {
+                Flush();
+                currentSection = line[1..^1].Trim();
+                continue;
+            }
+
+            foreach (var piece in HardSplit(line))
+            {
+                if (current.Length > 0 && current.Length + piece.Length + 1 > TargetChars)
+                    Flush();
+                if (current.Length > 0) current.Append('\n');
+                current.Append(piece);
+            }
+        }
+
+        Flush();
+        return results;
     }
 
     /// <summary>

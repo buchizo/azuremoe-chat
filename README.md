@@ -29,7 +29,7 @@ azuremoe-chat/
 - .NET 10 SDK
 - Windows x64 (LadybugDB ネイティブバインディングが win-x64 のみ)
 - WordPress エクスポート XML ファイル
-- エンティティ抽出用ローカル LLM (任意。`--NoLlm` でスキップ可)
+- エンティティ抽出用ローカル LLM (OpenAI 互換エンドポイント)
 
 ---
 
@@ -103,13 +103,6 @@ WordPress XML を読み込んでエンティティを抽出し、GraphDB を構�
 ### 基本的な実行
 
 ```bash
-# LLM なし (埋め込みのみ, 動作確認用)
-dotnet run --project src/AzureMoe.Chat.Ingest -- --NoLlm --SkipR2
-
-# LLM あり (Ollama)
-dotnet run --project src/AzureMoe.Chat.Ingest -- --SkipR2
-
-# R2 アップロードあり
 dotnet run --project src/AzureMoe.Chat.Ingest
 ```
 
@@ -133,11 +126,11 @@ dotnet run --project src/AzureMoe.Chat.Ingest
 #### ローカル LLM (エンティティ抽出)
 
 エンティティ・Azure サービス名の抽出に使用する OpenAI 互換エンドポイント。
-`--NoLlm` を指定するとこのステップをスキップする。
+通常記事はチャンクごとにエンティティ/関係/サービス名を LLM で抽出する。
+Azure Update 記事のサービス名は HTML の H2 構造から確定的に取得するため LLM 抽出対象外。
 
 | 引数 | 環境変数 | デフォルト | 説明 |
 |---|---|---|---|
-| `--NoLlm` | — | `false` | エンティティ抽出をスキップ (タグのみでグラフ構築) |
 | `--LlmBaseUrl` | `LLM_BASE_URL` | `http://localhost:11434/v1` | LLM エンドポイントのベース URL |
 | `--LlmModel` | `LLM_MODEL` | `qwen3:8b` | モデル名 (サーバーに読み込まれているモデル) |
 | `--LlmApiKey` | `LLM_API_KEY` | (なし) | API キー。ローカルサーバーは通常不要 |
@@ -155,19 +148,6 @@ dotnet run --project src/AzureMoe.Chat.Ingest
 | 引数 | 環境変数 | デフォルト | 説明 |
 |---|---|---|---|
 | `--OutDir` | — | `out` | `.lbdb` ファイルと `manifest.json` の出力先 |
-| `--SkipR2` | — | `false` | R2 アップロードをスキップ。ローカル確認時は指定推奨 |
-
-#### Cloudflare R2 アップロード (任意)
-
-4 項目すべて設定されている場合のみアップロードを実行する。
-シークレット情報のため **環境変数での設定を推奨**。
-
-| 引数 | 環境変数 | 説明 |
-|---|---|---|
-| `--R2AccountId` | `R2_ACCOUNT_ID` | Cloudflare アカウント ID |
-| `--R2AccessKeyId` | `R2_ACCESS_KEY_ID` | R2 の Access Key ID |
-| `--R2SecretAccessKey` | `R2_SECRET_ACCESS_KEY` | R2 の Secret Access Key |
-| `--R2Bucket` | `R2_BUCKET` | R2 バケット名 |
 
 ### appsettings.json での設定例
 
@@ -179,8 +159,7 @@ dotnet run --project src/AzureMoe.Chat.Ingest
   "ModelDir": "model/Xenova/multilingual-e5-small",
   "LlmBaseUrl": "http://localhost:11434/v1",
   "LlmModel": "qwen3:8b",
-  "OutDir": "out",
-  "SkipR2": true
+  "OutDir": "out"
 }
 ```
 
@@ -188,17 +167,13 @@ dotnet run --project src/AzureMoe.Chat.Ingest
 
 ```
 out/
-├── blog-20260614.lbdb    GraphDB ファイル (Ladybug 0.17.x 形式)
+├── blog-20260614120000.lbdb    GraphDB ファイル (Ladybug 0.17.x 形式)
 └── manifest.json         メタデータ (モデル情報・件数・SHA-256)
 ```
 
-> **グラフ探索を使うには `--NoLlm` を付けずに実行する。**
-> `--NoLlm` だと `Entity` / `AzureService` ノードと `MENTIONS` / `RELATED_TO` /
-> `COVERS_SERVICE` エッジが作られず、グラフは `Post` / `Chunk` / `Tag` のみになる。
-> チャットアプリの**エンティティ/サービスを辿った関連付け**にはこれらが必要なので、
-> 本番の DB は OpenAI 互換 LLM を立てて (`--NoLlm` なしで) ビルドすること。
-> なお埋め込みは記事タイトルを前置して生成され、各 `Chunk` には所属 `Post` の
-> 日付・タイトル・年・月が非正規化保存される (チャンク単位の日付フィルタ用)。
+> 各 `Chunk` には所属 `Post` の日付・タイトル・年・月が非正規化保存される
+> (チャンク単位の日付フィルタ用)。
+> グラフの詳細構造は「[GraphDB 構造](#graphdb-構造)」セクションを参照。
 
 ### 診断・検証サブコマンド (`inspect`)
 
@@ -210,7 +185,7 @@ out/
 dotnet run --project src/AzureMoe.Chat.Ingest -- inspect
 
 # DB を明示指定 (省略時は out/ → wwwroot/data/ の順に最新 .lbdb を自動検出)
-dotnet run --project src/AzureMoe.Chat.Ingest -- inspect out/blog-20260614.lbdb
+dotnet run --project src/AzureMoe.Chat.Ingest -- inspect out/blog-20260614120000.lbdb
 
 # 2. 任意の Cypher を実行 (結果をテーブル表示)
 dotnet run --project src/AzureMoe.Chat.Ingest -- inspect --cypher \
@@ -228,8 +203,148 @@ dotnet run --project src/AzureMoe.Chat.Ingest -- inspect --query "2026年2月の
 | `--model` | `model/Xenova/multilingual-e5-small` | `--query` 用 ONNX モデルのディレクトリ |
 | `--topk` | `8` | `--query` で返す件数 |
 
-> 引数なし (`inspect`) の統計表示で `Entity` / `AzureService` が **0 件**なら、その DB は
-> `--NoLlm` でビルドされている。グラフ探索を使いたい場合は再ビルドが必要。
+---
+
+### 追記サブコマンド (`append`)
+
+既存の `.lbdb` にブログ記事を 1 件追加する。WordPress XML 全件再インジェストをせずに
+新着記事だけをインクリメンタルに反映したいときに使う。
+
+処理の流れ:
+1. 指定 URL のブログ記事を HTTP で取得
+2. 元の `.lbdb` を日付付きファイル名でコピー (元ファイルは変更しない)
+3. コピーしたファイルにチャンク・埋め込み・LLM 抽出結果を追記
+4. ベクトルインデックスを再作成してから `manifest.json` を更新
+
+```bash
+# 基本: URL と元 DB を指定して追記
+dotnet run --project src/AzureMoe.Chat.Ingest -- append \
+  https://example.com/2026/06/azure-update-june/ \
+  out/blog-20260618120000.lbdb
+
+# 既に存在する URL を上書きしたい場合
+dotnet run --project src/AzureMoe.Chat.Ingest -- append \
+  https://example.com/2026/06/azure-update-june/ \
+  out/blog-20260618120000.lbdb --Override
+
+# 出力先を変える / LLM を切り替える
+dotnet run --project src/AzureMoe.Chat.Ingest -- append \
+  https://example.com/2026/06/azure-update-june/ \
+  out/blog-20260618120000.lbdb \
+  --OutDir T:\temp\output \
+  --LlmBaseUrl http://localhost:1234/v1 \
+  --LlmModel qwen3-8b
+```
+
+| 引数 | デフォルト | 説明 |
+|---|---|---|
+| `<url>` (位置 1) | — | 取得するブログ記事の URL |
+| `<sourceDbPath>` (位置 2) | — | コピー元の `.lbdb` ファイルパス |
+| `--Override` | `false` | 同じ URL の Post が既に存在する場合に削除して上書きする |
+| `--OutDir` | `out` | 出力 `.lbdb` と `manifest.json` の書き出し先 |
+| `--ModelDir` | `model/Xenova/multilingual-e5-small` | ONNX 埋め込みモデルのディレクトリ |
+| `--LlmBaseUrl` | `http://localhost:11434/v1` | LLM エンドポイント |
+| `--LlmModel` | `qwen3:8b` | LLM モデル名 |
+| `--LlmApiKey` | (なし) | LLM API キー |
+
+> 同じ URL を `--Override` なしで追記しようとするとエラーになる。
+> 出力ファイル名は `blog-<yyyyMMdd>.lbdb` (実行日の UTC 日付)。
+
+---
+
+## GraphDB 構造
+
+インジェストが生成する `.lbdb` ファイルの内部構造。LadybugDB (グラフDB) に格納され、
+ブラウザの WASM 版も同じファイルをそのまま開く。
+
+### 投稿タイプによるチャンク方針
+
+ブログには構造的に異なる 2 種類の投稿が混在するため、タイトルで判定して処理を分岐させる。
+
+#### Azure Update 記事 (タイトルが "Azure Update" または "Azure Updates" で始まる)
+
+週次アップデートまとめ記事。H2 見出しがサービス名、その配下の箇条書きが更新内容になっている。
+
+```
+<h2>Azure Functions</h2>          ← serviceName = "Azure Functions"
+<ul>
+  <li>Flex Consumption で新機能   ← Chunk 1 (chunkType = "update_item")
+    <ul><li>詳細...</li></ul>       ← 子要素は親と一体で保持
+  </li>
+  <li>従量課金で改善              ← Chunk 2 (update_item)
+  </li>
+</ul>
+<h2>Azure Container Apps</h2>     ← serviceName = "Azure Container Apps"
+  ...
+```
+
+- **チャンク単位**: `<li>` 1 件 ＋ その子要素（子要素は親への補足コメントとして一体保持）
+- **埋め込み入力**: `"Azure Functions\n\nFlex Consumption で新機能..."` （サービス名をプレフィックス）
+- **サービス名**: H2 テキストから確定的に取得（LLM 不要）
+
+#### 通常記事
+
+特定テーマについての文章記事。
+
+- **チャンク単位**: 段落境界での 800 文字区切り（超長段落は文末で 1,200 文字まで強制分割）
+- **埋め込み入力**: `"記事タイトル\n\nチャンクテキスト"`
+- **セクション情報**: 直前の H2/H3 見出しを `sectionTitle` フィールドに記録
+
+---
+
+### ノード一覧
+
+| ノード | 主なフィールド | 説明 |
+|--------|--------------|------|
+| `Post` | `id, title, url, date, year, month` | ブログ記事 1 件 |
+| `Chunk` | 下表参照 | テキストチャンク（ベクトル付き） |
+| `AzureService` | `name` | Azure サービス名（正式名称） |
+| `Entity` | `name, type, description` | LLM 抽出エンティティ（人物・技術・機能など）|
+| `Tag` | `name` | WordPress タグ |
+
+**Chunk フィールド詳細**
+
+| フィールド | 型 | 説明 |
+|-----------|-----|------|
+| `id` | INT64 | 主キー |
+| `postId` | INT64 | 所属 Post の id |
+| `ordinal` | INT64 | Post 内での順序 |
+| `text` | STRING | チャンク本文 |
+| `date / year / month` | STRING / INT64 | Post から非正規化（日付フィルタ用） |
+| `title` | STRING | Post タイトル（引用表示用） |
+| `sectionTitle` | STRING | 直前の H2/H3 見出しテキスト |
+| `serviceName` | STRING | Azure Update 記事のみ: H2 のサービス名。通常記事は空文字 |
+| `chunkType` | STRING | `"update_item"` (Update 記事の箇条書き) / `"prose"` (通常テキスト) |
+| `emb` | FLOAT[384] | multilingual-e5-small による埋め込みベクトル |
+
+---
+
+### エッジ一覧
+
+```
+Post ──HAS_CHUNK──────▶ Chunk
+Post ──TAGGED──────────▶ Tag
+Post ──COVERS_SERVICE──▶ AzureService   ← Azure Update 記事は H2 から、通常記事は LLM から収集
+Chunk ──MENTIONS───────▶ Entity         ← LLM 抽出（全記事）
+Entity ──RELATED_TO────▶ Entity         ← LLM 抽出（全記事）
+```
+
+---
+
+### ベクトルインデックス
+
+| インデックス名 | 対象 | 距離計算 |
+|--------------|------|---------|
+| `chunk_emb_idx` | `Chunk.emb` | コサイン類似度 (HNSW) |
+
+---
+
+### サービス名の収集方針
+
+| 記事タイプ | 収集元 | 特徴 |
+|-----------|--------|------|
+| Azure Update 記事 | H2 見出しテキスト | 確定的・LLM 不要・ブレなし |
+| 通常記事 | LLM (EntityExtractor) | 本文から柔軟に抽出 |
 
 ---
 
@@ -244,7 +359,7 @@ dotnet run --project src/AzureMoe.Chat.Ingest -- inspect --query "2026年2月の
 dotnet run --project src/AzureMoe.Chat.Verify
 
 # DB を明示指定
-dotnet run --project src/AzureMoe.Chat.Verify -- --DbPath out/blog-20260614.lbdb
+dotnet run --project src/AzureMoe.Chat.Verify -- --DbPath out/blog-20260614120000.lbdb
 
 # 結果件数を変える
 dotnet run --project src/AzureMoe.Chat.Verify -- --TopK 10
@@ -347,7 +462,7 @@ Chrome AI が使えない環境向けに `appsettings.json` で変更可能:
 **1. インジェストで DB を生成**
 
 ```bash
-dotnet run --project src/AzureMoe.Chat.Ingest -- --NoLlm --SkipR2
+dotnet run --project src/AzureMoe.Chat.Ingest
 ```
 
 **2. 生成物を Web プロジェクトの data ディレクトリにコピー**

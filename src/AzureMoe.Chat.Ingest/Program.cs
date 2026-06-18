@@ -17,7 +17,7 @@ if (args.Length > 0 && args[0].Equals("inspect", StringComparison.OrdinalIgnoreC
 // `append` subcommand — fetch one blog post from a URL and append it to an
 // existing .lbdb, copying the source DB to a dated output file first.
 //   dotnet run --project src/AzureMoe.Chat.Ingest -- append <url> <sourceDbPath>
-//   ... append <url> <sourceDbPath> [--OutDir <dir>] [--ModelDir <dir>] [--NoLlm] [--Override]
+//   ... append <url> <sourceDbPath> [--OutDir <dir>] [--ModelDir <dir>] [--Override] [LLM options]
 // ---------------------------------------------------------------------------
 if (args.Length > 0 && args[0].Equals("append", StringComparison.OrdinalIgnoreCase))
     return await RunAppendAsync(args[1..]);
@@ -43,7 +43,7 @@ opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
 // Paths
 // ---------------------------------------------------------------------------
 Directory.CreateDirectory(opt.OutDir);
-var dateStamp    = DateTime.UtcNow.ToString("yyyyMMdd");
+var dateStamp    = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
 var dbFileName   = $"blog-{dateStamp}.lbdb";
 var dbPath       = Path.Combine(opt.OutDir, dbFileName);
 var manifestPath = Path.Combine(opt.OutDir, "manifest.json");
@@ -52,10 +52,7 @@ Console.WriteLine($"XML ディレクトリ : {Path.GetFullPath(opt.XmlDir)}");
 Console.WriteLine($"出力先           : {Path.GetFullPath(opt.OutDir)}");
 Console.WriteLine($"DB               : {dbFileName}");
 Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}");
-if (opt.NoLlm)
-    Console.WriteLine($"LLM              : (スキップ)");
-else
-    Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
+Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
 Console.WriteLine();
 
 using var cts = new CancellationTokenSource();
@@ -90,10 +87,33 @@ try
     long chunkId = 0;
     foreach (var post in posts)
     {
-        var text   = Chunking.HtmlToText(post.Html);
-        var pieces = Chunking.SplitIntoChunks(text);
-        foreach (var (piece, ordinal) in pieces.Select((p, i) => (p, i)))
-            chunks.Add(new Chunk { Id = chunkId++, PostId = post.Id, Ordinal = ordinal, Text = piece });
+        if (post.IsUpdatePost)
+        {
+            var items = UpdatePostParser.Parse(post.Html);
+            for (var i = 0; i < items.Count; i++)
+            {
+                var (svc, text, type) = items[i];
+                if (!string.IsNullOrWhiteSpace(text))
+                    chunks.Add(new Chunk
+                    {
+                        Id = chunkId++, PostId = post.Id, Ordinal = i,
+                        Text = text, SectionTitle = svc, ServiceName = svc, ChunkType = type,
+                    });
+            }
+        }
+        else
+        {
+            var sections = Chunking.SplitWithSections(post.Html);
+            for (var i = 0; i < sections.Count; i++)
+            {
+                var (text, section) = sections[i];
+                chunks.Add(new Chunk
+                {
+                    Id = chunkId++, PostId = post.Id, Ordinal = i,
+                    Text = text, SectionTitle = section, ServiceName = "", ChunkType = "prose",
+                });
+            }
+        }
     }
     Console.WriteLine($" {chunks.Count} チャンク");
 
@@ -103,14 +123,21 @@ try
     Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、モデル: {opt.ModelDir})...");
     using var embedder = new E5Embedder(opt.ModelDir);
 
-    // Prepend the post title so each chunk's vector carries the article's identity
-    // (topic/date). Improves relevance for "what was posted about X" style queries.
+    // Update post chunks: prepend service name so the vector captures both the
+    // service identity and the update content.
+    // Article post chunks: prepend the post title (same as before).
     var titleById = posts.ToDictionary(p => p.Id, p => p.Title);
     for (var i = 0; i < chunks.Count; i++)
     {
         cts.Token.ThrowIfCancellationRequested();
-        var title = titleById.GetValueOrDefault(chunks[i].PostId, "");
-        var embedInput = string.IsNullOrEmpty(title) ? chunks[i].Text : $"{title}\n\n{chunks[i].Text}";
+        string embedInput;
+        if (chunks[i].ChunkType == "update_item" && !string.IsNullOrEmpty(chunks[i].ServiceName))
+            embedInput = $"{chunks[i].ServiceName}\n\n{chunks[i].Text}";
+        else
+        {
+            var title = titleById.GetValueOrDefault(chunks[i].PostId, "");
+            embedInput = string.IsNullOrEmpty(title) ? chunks[i].Text : $"{title}\n\n{chunks[i].Text}";
+        }
         chunks[i].Embedding = embedder.EmbedPassage(embedInput);
         if ((i + 1) % 20 == 0 || i == chunks.Count - 1)
             Console.Write($"\r  [{i + 1}/{chunks.Count}]  dim={embedder.Dimension}  ");
@@ -118,34 +145,31 @@ try
     Console.WriteLine("完了");
 
     // -----------------------------------------------------------------------
-    // Step 4: Extract entities + Azure service names (unless --NoLlm)
+    // Step 4: Extract entities + Azure service names
     // -----------------------------------------------------------------------
     var extractions = new Dictionary<long, Extraction>();
-    if (!opt.NoLlm)
+    Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
+    Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
+    using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
+
+    for (var i = 0; i < chunks.Count; i++)
     {
-        Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
-        Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
-        using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
-
-        for (var i = 0; i < chunks.Count; i++)
+        cts.Token.ThrowIfCancellationRequested();
+        try
         {
-            cts.Token.ThrowIfCancellationRequested();
-            try
-            {
-                extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
-            }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
-                extractions[chunks[i].Id] = new Extraction([], [], []);
-            }
-
-            if ((i + 1) % 5 == 0 || i == chunks.Count - 1)
-                Console.Write($"\r  [{i + 1}/{chunks.Count}]  ");
+            extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
         }
-        Console.WriteLine("完了");
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
+            extractions[chunks[i].Id] = new Extraction([], [], []);
+        }
+
+        if ((i + 1) % 5 == 0 || i == chunks.Count - 1)
+            Console.Write($"\r  [{i + 1}/{chunks.Count}]  ");
     }
+    Console.WriteLine("完了");
 
     // -----------------------------------------------------------------------
     // Step 5: Build graph database
@@ -261,7 +285,7 @@ static async Task<int> RunAppendAsync(string[] rest)
     opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
 
     Directory.CreateDirectory(opt.OutDir);
-    var dateStamp    = DateTime.UtcNow.ToString("yyyyMMdd");
+    var dateStamp    = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
     var dbFileName   = $"blog-{dateStamp}.lbdb";
     var dbPath       = Path.Combine(opt.OutDir, dbFileName);
     var manifestPath = Path.Combine(opt.OutDir, "manifest.json");
@@ -271,10 +295,7 @@ static async Task<int> RunAppendAsync(string[] rest)
     Console.WriteLine($"出力DB           : {Path.GetFullPath(dbPath)}");
     Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}");
     Console.WriteLine($"上書きモード     : {(overrideMode ? "あり (--Override)" : "なし")}");
-    if (opt.NoLlm)
-        Console.WriteLine($"LLM              : (スキップ)");
-    else
-        Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
+    Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
     Console.WriteLine();
 
     using var cts = new CancellationTokenSource();
@@ -297,7 +318,24 @@ static async Task<int> RunAppendAsync(string[] rest)
         var srcFull = Path.GetFullPath(sourceDbPath);
         var dstFull = Path.GetFullPath(dbPath);
         if (!srcFull.Equals(dstFull, StringComparison.OrdinalIgnoreCase))
-            File.Copy(sourceDbPath, dbPath, overwrite: true);
+        {
+            var srcDir  = Path.GetDirectoryName(srcFull)!;
+            var srcName = Path.GetFileName(srcFull);
+            var dstDir  = Path.GetDirectoryName(dstFull)!;
+            var dstName = Path.GetFileName(dstFull);
+
+            // Remove stale companion files at destination before copying.
+            foreach (var f in Directory.GetFiles(dstDir, dstName + "*"))
+                File.Delete(f);
+
+            // Copy main file and all companion files (WAL, lock, etc.),
+            // renaming each to the destination base name.
+            foreach (var srcFile in Directory.GetFiles(srcDir, srcName + "*"))
+            {
+                var suffix = srcFile[srcFull.Length..]; // e.g. "" / ".wal" / ".lock"
+                File.Copy(srcFile, dstFull + suffix, overwrite: true);
+            }
+        }
         Console.WriteLine($" 完了 ({new FileInfo(dbPath).Length / 1024:N0} KB)");
 
         // -----------------------------------------------------------------------
@@ -340,11 +378,35 @@ static async Task<int> RunAppendAsync(string[] rest)
 
             // Step 5: Chunk
             Console.Write("チャンク分割中...");
-            var text   = Chunking.HtmlToText(post.Html);
-            var pieces = Chunking.SplitIntoChunks(text);
-            chunks = new List<Chunk>(pieces.Count);
-            for (var i = 0; i < pieces.Count; i++)
-                chunks.Add(new Chunk { Id = nextChunkId + i, PostId = post.Id, Ordinal = i, Text = pieces[i] });
+            if (post.IsUpdatePost)
+            {
+                var items = UpdatePostParser.Parse(post.Html);
+                chunks = new List<Chunk>(items.Count);
+                for (var i = 0; i < items.Count; i++)
+                {
+                    var (svc, text, type) = items[i];
+                    if (!string.IsNullOrWhiteSpace(text))
+                        chunks.Add(new Chunk
+                        {
+                            Id = nextChunkId + chunks.Count, PostId = post.Id, Ordinal = i,
+                            Text = text, SectionTitle = svc, ServiceName = svc, ChunkType = type,
+                        });
+                }
+            }
+            else
+            {
+                var sections = Chunking.SplitWithSections(post.Html);
+                chunks = new List<Chunk>(sections.Count);
+                for (var i = 0; i < sections.Count; i++)
+                {
+                    var (text, section) = sections[i];
+                    chunks.Add(new Chunk
+                    {
+                        Id = nextChunkId + i, PostId = post.Id, Ordinal = i,
+                        Text = text, SectionTitle = section, ServiceName = "", ChunkType = "prose",
+                    });
+                }
+            }
             Console.WriteLine($" {chunks.Count} チャンク");
 
             // Step 6: Embed
@@ -353,35 +415,36 @@ static async Task<int> RunAppendAsync(string[] rest)
             for (var i = 0; i < chunks.Count; i++)
             {
                 cts.Token.ThrowIfCancellationRequested();
-                var embedInput = string.IsNullOrEmpty(post.Title) ? chunks[i].Text : $"{post.Title}\n\n{chunks[i].Text}";
+                string embedInput;
+                if (chunks[i].ChunkType == "update_item" && !string.IsNullOrEmpty(chunks[i].ServiceName))
+                    embedInput = $"{chunks[i].ServiceName}\n\n{chunks[i].Text}";
+                else
+                    embedInput = string.IsNullOrEmpty(post.Title) ? chunks[i].Text : $"{post.Title}\n\n{chunks[i].Text}";
                 chunks[i].Embedding = embedder.EmbedPassage(embedInput);
             }
             embeddingDim = embedder.Dimension > 0 ? embedder.Dimension : GraphSchema.EmbeddingDim;
             Console.WriteLine($"  完了 (dim={embedder.Dimension})");
 
-            // Step 7: Extract entities + Azure service names (unless --NoLlm)
+            // Step 7: Extract entities + Azure service names
             var extractions = new Dictionary<long, Extraction>();
-            if (!opt.NoLlm)
+            Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
+            Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
+            using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
+            for (var i = 0; i < chunks.Count; i++)
             {
-                Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
-                Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
-                using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
-                for (var i = 0; i < chunks.Count; i++)
+                cts.Token.ThrowIfCancellationRequested();
+                try
                 {
-                    cts.Token.ThrowIfCancellationRequested();
-                    try
-                    {
-                        extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
-                    }
-                    catch (OperationCanceledException) { throw; }
-                    catch (Exception ex)
-                    {
-                        Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
-                        extractions[chunks[i].Id] = new Extraction([], [], []);
-                    }
+                    extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
                 }
-                Console.WriteLine("  完了");
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
+                    extractions[chunks[i].Id] = new Extraction([], [], []);
+                }
             }
+            Console.WriteLine("  完了");
 
             // Step 8: Append to DB
             Console.WriteLine("グラフDB 追記中...");
@@ -455,7 +518,7 @@ static int RunInspect(string[] rest)
     var dbPath = rest.FirstOrDefault(a => !a.StartsWith('-')) ?? FindNewestDb();
     if (dbPath is null)
     {
-        Console.Error.WriteLine("DB ファイルを指定してください (例: inspect out/blog-YYYYMMDD.lbdb)。");
+        Console.Error.WriteLine("DB ファイルを指定してください (例: inspect out/blog-YYYYMMDDHHmmss.lbdb)。");
         return 1;
     }
 

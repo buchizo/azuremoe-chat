@@ -37,7 +37,10 @@ public static class GraphSchema
         "CREATE NODE TABLE Post(id INT64, title STRING, url STRING, date STRING, year INT64, month INT64, PRIMARY KEY(id))",
         // date/title/year/month are denormalised from the owning Post so chunk-level
         // queries (date filtering, display) need no join back to Post.
-        $"CREATE NODE TABLE Chunk(id INT64, postId INT64, ordinal INT64, text STRING, date STRING, title STRING, year INT64, month INT64, emb FLOAT[{embeddingDim}], PRIMARY KEY(id))",
+        // sectionTitle: H2/H3 heading above this chunk (empty when unknown)
+        // serviceName:  Azure service name from H2 in Update posts; empty for Article posts
+        // chunkType:    "update_item" | "prose"
+        $"CREATE NODE TABLE Chunk(id INT64, postId INT64, ordinal INT64, text STRING, date STRING, title STRING, year INT64, month INT64, sectionTitle STRING, serviceName STRING, chunkType STRING, emb FLOAT[{embeddingDim}], PRIMARY KEY(id))",
         "CREATE NODE TABLE Entity(name STRING, type STRING, description STRING, PRIMARY KEY(name))",
         "CREATE NODE TABLE AzureService(name STRING, PRIMARY KEY(name))",
         "CREATE NODE TABLE Tag(name STRING, PRIMARY KEY(name))",

@@ -20,10 +20,19 @@ public sealed class GraphBuilder : IDisposable
 
     public GraphBuilder(string dbPath)
     {
-        if (File.Exists(dbPath)) File.Delete(dbPath);
-        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(dbPath))!);
+        var fullPath = Path.GetFullPath(dbPath);
+        var dir      = Path.GetDirectoryName(fullPath)!;
+        var name     = Path.GetFileName(fullPath);
 
-        _db   = new Database(dbPath, new SystemConfig());
+        Directory.CreateDirectory(dir);
+
+        // Delete the DB file and all companion files (WAL, lock, etc.) that
+        // LadybugDB may have left from a previous run. Deleting only the main
+        // file causes "Failed to open" on the next run.
+        foreach (var f in Directory.GetFiles(dir, name + "*"))
+            File.Delete(f);
+
+        _db   = new Database(fullPath, new SystemConfig());
         _conn = new Connection(_db);
     }
 
@@ -75,7 +84,9 @@ public sealed class GraphBuilder : IDisposable
             var (cy, cm) = GraphSchema.ParseYearMonth(date);
             Exec($"CREATE (:Chunk {{id: {c.Id}, postId: {c.PostId}, ordinal: {c.Ordinal}, " +
                  $"text: '{Esc(c.Text)}', date: '{Esc(date)}', title: '{Esc(post?.Title ?? "")}', " +
-                 $"year: {cy}, month: {cm}, emb: {CypherFloatArray(emb)}}})");
+                 $"year: {cy}, month: {cm}, " +
+                 $"sectionTitle: '{Esc(c.SectionTitle)}', serviceName: '{Esc(c.ServiceName)}', chunkType: '{Esc(c.ChunkType)}', " +
+                 $"emb: {CypherFloatArray(emb)}}})");
         }
         Exec("COMMIT");
 
@@ -104,21 +115,33 @@ public sealed class GraphBuilder : IDisposable
             Exec("COMMIT");
         }
 
-        // --- Azure services (from LLM extractions) -------------------------
-        // Collect unique service names across all extractions, grouped by post.
-        var allServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // --- Azure services -------------------------------------------------
+        // Update posts: service names come from H2 headings (chunk.ServiceName).
+        // Article posts: service names come from LLM extraction.
+        var allServices  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var postServices = new Dictionary<long, HashSet<string>>();
+
+        void AddService(long postId, string svc)
+        {
+            if (string.IsNullOrWhiteSpace(svc)) return;
+            allServices.Add(svc);
+            if (!postServices.TryGetValue(postId, out var set))
+                postServices[postId] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            set.Add(svc);
+        }
 
         foreach (var chunk in chunks)
         {
-            if (!extractions.TryGetValue(chunk.Id, out var ex)) continue;
-            foreach (var svc in ex.AzureServices ?? [])
+            if (!string.IsNullOrEmpty(chunk.ServiceName))
             {
-                if (string.IsNullOrWhiteSpace(svc)) continue;
-                allServices.Add(svc);
-                if (!postServices.TryGetValue(chunk.PostId, out var set))
-                    postServices[chunk.PostId] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                set.Add(svc);
+                // Update post: structural service name from H2
+                AddService(chunk.PostId, chunk.ServiceName);
+            }
+            else if (extractions.TryGetValue(chunk.Id, out var ex))
+            {
+                // Article post: LLM-extracted service names
+                foreach (var svc in ex.AzureServices ?? [])
+                    AddService(chunk.PostId, svc);
             }
         }
 

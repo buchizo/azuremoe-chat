@@ -1,7 +1,12 @@
 namespace AzureMoe.Chat.Core;
 
 /// <summary>A WordPress post reduced to what the graph needs.</summary>
-public sealed record Post(long Id, string Title, string Url, string Date, string Html, IReadOnlyList<string> Tags);
+public sealed record Post(long Id, string Title, string Url, string Date, string Html, IReadOnlyList<string> Tags)
+{
+    /// <summary>True when the title starts with "Azure Update" or "Azure Updates".</summary>
+    public bool IsUpdatePost =>
+        Title.StartsWith("Azure Update", StringComparison.OrdinalIgnoreCase);
+}
 
 /// <summary>A chunk of cleaned post text plus its embedding (filled in later).</summary>
 public sealed record Chunk
@@ -10,6 +15,12 @@ public sealed record Chunk
     public required long PostId { get; init; }
     public required int Ordinal { get; init; }
     public required string Text { get; init; }
+    /// <summary>H2/H3 heading that precedes this chunk (empty when unknown).</summary>
+    public string SectionTitle { get; init; } = "";
+    /// <summary>Azure service name extracted from H2 heading in Update posts; empty for Article posts.</summary>
+    public string ServiceName { get; init; } = "";
+    /// <summary>"update_item" for structured Update-post bullets; "prose" for all other chunks.</summary>
+    public string ChunkType { get; init; } = "prose";
     public float[]? Embedding { get; set; }
 }
 

@@ -2,8 +2,8 @@ namespace AzureMoe.Chat.Ingest;
 
 /// <summary>
 /// All ingest configuration. Bound from (in priority order) command line,
-/// environment variables, then appsettings.json. Secrets (API keys, R2
-/// credentials) should come from env vars, never appsettings.
+/// environment variables, then appsettings.json. Secrets (API keys)
+/// should come from env vars, never appsettings.
 /// </summary>
 public sealed class IngestOptions
 {
@@ -40,10 +40,6 @@ public sealed class IngestOptions
     /// Env: LLM_API_KEY
     /// </summary>
     public string? LlmApiKey { get; set; }
-
-    /// <summary>Skip the LLM extraction step; build the graph from tags only.
-    /// Useful for testing the rest of the pipeline without a running LLM.</summary>
-    public bool NoLlm { get; set; }
 
     // --- Embeddings (multilingual-e5-small, ONNX local) -------------------
 

@@ -121,7 +121,9 @@ public sealed class GraphAppender : IDisposable
             var emb = c.Embedding ?? throw new InvalidOperationException($"Chunk {c.Id} has no embedding.");
             Exec($"CREATE (:Chunk {{id: {c.Id}, postId: {c.PostId}, ordinal: {c.Ordinal}, " +
                  $"text: '{Esc(c.Text)}', date: '{Esc(post.Date)}', title: '{Esc(post.Title)}', " +
-                 $"year: {py}, month: {pm}, emb: {CypherFloatArray(emb)}}})");
+                 $"year: {py}, month: {pm}, " +
+                 $"sectionTitle: '{Esc(c.SectionTitle)}', serviceName: '{Esc(c.ServiceName)}', chunkType: '{Esc(c.ChunkType)}', " +
+                 $"emb: {CypherFloatArray(emb)}}})");
         }
         Exec("COMMIT");
 
@@ -155,12 +157,20 @@ public sealed class GraphAppender : IDisposable
         }
 
         // --- Azure services --------------------------------------------------
+        // Update posts: from H2 headings (chunk.ServiceName).
+        // Article posts: from LLM extraction.
         var allServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var chunk in chunks)
         {
-            if (!extractions.TryGetValue(chunk.Id, out var ex)) continue;
-            foreach (var svc in ex.AzureServices ?? [])
-                if (!string.IsNullOrWhiteSpace(svc)) allServices.Add(svc);
+            if (!string.IsNullOrEmpty(chunk.ServiceName))
+            {
+                allServices.Add(chunk.ServiceName);
+            }
+            else if (extractions.TryGetValue(chunk.Id, out var ex))
+            {
+                foreach (var svc in ex.AzureServices ?? [])
+                    if (!string.IsNullOrWhiteSpace(svc)) allServices.Add(svc);
+            }
         }
 
         if (allServices.Count > 0)
