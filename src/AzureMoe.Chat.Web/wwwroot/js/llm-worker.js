@@ -210,6 +210,16 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
           activeDevice = s.device;
           loadedDtype  = s.dtype;
           lastError    = null;
+          // Patch: {%- generation %}/{%- endgeneration %} are used by some models
+          // (e.g. LFM2.5 base) as output-section markers in the chat template.
+          // transformers.js 4.2.0 does not implement this Jinja statement and throws
+          // "Unknown statement type: generation". Strip the tags — they contain no
+          // formatting logic, so the template output is identical without them.
+          if (pipe.tokenizer?.chat_template) {
+            pipe.tokenizer.chat_template = pipe.tokenizer.chat_template
+              .replace(/\{%-?\s*generation\s*-?%\}/g, "")
+              .replace(/\{%-?\s*endgeneration\s*-?%\}/g, "");
+          }
           break;
         } catch (e) {
           lastError = e;
