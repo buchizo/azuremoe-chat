@@ -1,4 +1,4 @@
-namespace AzureMoe.Chat.Core;
+﻿namespace AzureMoe.Chat.Core;
 
 /// <summary>
 /// The single source of truth for the GraphRAG schema, shared by the ingest
@@ -17,6 +17,9 @@ public static class GraphSchema
 
     /// <summary>Embedding model id (same ONNX on both sides — see POC-3).</summary>
     public const string EmbeddingModel = "Xenova/multilingual-e5-small";
+
+    /// <summary>Quantization dtype used on both ingest and browser sides.</summary>
+    public const string EmbeddingDtype = "q4";
 
     // e5 requires these prefixes; queries and passages live in different "modes".
     public const string QueryPrefix = "query: ";
@@ -40,7 +43,9 @@ public static class GraphSchema
         // sectionTitle: H2/H3 heading above this chunk (empty when unknown)
         // serviceName:  Azure service name from H2 in Update posts; empty for Article posts
         // chunkType:    "update_item" | "prose"
-        $"CREATE NODE TABLE Chunk(id INT64, postId INT64, ordinal INT64, text STRING, date STRING, title STRING, year INT64, month INT64, sectionTitle STRING, serviceName STRING, chunkType STRING, emb FLOAT[{embeddingDim}], PRIMARY KEY(id))",
+        // contextText:  small-to-big generation context (neighbouring bullets/chunks);
+        //               empty means "use text as-is"
+        $"CREATE NODE TABLE Chunk(id INT64, postId INT64, ordinal INT64, text STRING, contextText STRING, date STRING, title STRING, year INT64, month INT64, sectionTitle STRING, serviceName STRING, chunkType STRING, emb FLOAT[{embeddingDim}], PRIMARY KEY(id))",
         "CREATE NODE TABLE Entity(name STRING, type STRING, description STRING, PRIMARY KEY(name))",
         "CREATE NODE TABLE AzureService(name STRING, PRIMARY KEY(name))",
         "CREATE NODE TABLE Tag(name STRING, PRIMARY KEY(name))",
@@ -49,6 +54,10 @@ public static class GraphSchema
         "CREATE REL TABLE RELATED_TO(FROM Entity TO Entity, description STRING)",
         "CREATE REL TABLE TAGGED(FROM Post TO Tag)",
         "CREATE REL TABLE COVERS_SERVICE(FROM Post TO AzureService)",
+        // Chunk-level service edge: unlike Post-level COVERS_SERVICE (which pulls
+        // arbitrary chunks out of 30-service monthly digests), seed-chunk →
+        // service → chunk expansion returns "other updates about the same service".
+        "CREATE REL TABLE ABOUT_SERVICE(FROM Chunk TO AzureService)",
     ];
 
     /// <summary>DDL using the default E5 embedding dimension (384).</summary>

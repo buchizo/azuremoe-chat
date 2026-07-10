@@ -1,5 +1,7 @@
 ﻿@page "/"
 @using AzureMoe.Chat.Web.Services
+@using System.Net.Http.Json
+@inject HttpClient Http
 @inject IJSRuntime JS
 @inject NavigationManager Nav
 @inject AssetLoader AssetLoader
@@ -160,6 +162,13 @@ else
             Print($"DB: {manifest.DatabaseFile}  " +
                   $"投稿 {manifest.PostCount} 件 / チャンク {manifest.ChunkCount} 件", "info");
 
+            // The DB was built with a specific embedding dtype (see manifest);
+            // appsettings.json can drift from that after a rebuild. Using a
+            // mismatched dtype embeds queries in a subtly different vector space
+            // than the passages were built with, so the manifest wins.
+            var embeddingDtype = !string.IsNullOrEmpty(manifest.EmbeddingDtype)
+                ? manifest.EmbeddingDtype : Cfg.EmbeddingDtype;
+
             // ── Step 2: DB download (or cache hit) ──
             Status("GraphDB を読み込み中...");
             byte[]? dbBytes = null;
@@ -188,7 +197,7 @@ else
                 Status("GraphDB を初期化中 (キーワード検索モード)...");
                 var ragProgMobile = new Progress<(string Stage, string File, int Pct)>(t =>
                     Status($"GraphDB: {t.File} {t.Pct}%"));
-                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, ragProgMobile,
+                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, embeddingDtype, ragProgMobile,
                     skipEmbedding: true, _cts.Token);
                 Print("GraphDB 準備完了（キーワード検索モード）", "ok");
                 if (Router.IsHttpMode)
@@ -204,7 +213,7 @@ else
                     var label = t.Stage == "db" ? "GraphDB" : "埋め込みモデル";
                     Status($"{label}: {t.File} {t.Pct}%");
                 });
-                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, ragProg, ct: _cts.Token);
+                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, embeddingDtype, ragProg, ct: _cts.Token);
                 Print("GraphDB + 埋め込みモデル準備完了", "ok");
 
                 // ── Step 4: LLM preload ──
@@ -452,6 +461,9 @@ else
                 _debugMode = arg == "on";
                 Print($"デバッグモード: {(_debugMode ? "ON" : "OFF")}", "info");
                 break;
+            case "eval":
+                await RunEvalAsync();
+                break;
             case "llm":
                 if (string.IsNullOrWhiteSpace(arg))
                 {
@@ -498,7 +510,7 @@ else
     {
         Print("コマンド:", "heading");
         Print("  /help     — このヘルプを表示", "dim");
-        Print("  /mode [fast|normal] — 探索の深さを表示/変更", "dim");
+        Print("  /mode [fast|normal|deep] — 探索の深さを表示/変更", "dim");
         Print("  /llm [endpoint [model]] — 外部 LLM エンドポイントを設定/解除", "dim");
         Print("  /info     — 現在のモデル情報", "dim");
         Print("  /license  — ライセンス情報を表示", "dim");
@@ -519,7 +531,7 @@ else
         if (string.IsNullOrWhiteSpace(arg))
         {
             Print($"現在の探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
-            Print("変更: /mode fast | /mode normal", "dim");
+            Print("変更: /mode fast | /mode normal | /mode deep", "dim");
             return;
         }
 
@@ -530,8 +542,116 @@ else
         }
         else
         {
-            Print($"不明なモード: {EscapeHtml(arg)}  (fast / normal のいずれか)", "warn");
+            Print($"不明なモード: {EscapeHtml(arg)}  (fast / normal / deep のいずれか)", "warn");
         }
+    }
+
+    // ── /eval: run the fixed query set through the pipeline (hidden command) ──
+
+    private sealed record EvalQuery(string Query, string? FollowUp = null, string? Note = null);
+
+    private async Task RunEvalAsync()
+    {
+        List<EvalQuery>? queries;
+        try
+        {
+            queries = await Http.GetFromJsonAsync<List<EvalQuery>>("eval-queries.json");
+        }
+        catch (Exception ex)
+        {
+            Print($"eval-queries.json の読み込みに失敗: {EscapeHtml(ex.Message)}", "error");
+            return;
+        }
+        if (queries is null || queries.Count == 0)
+        {
+            Print("eval-queries.json にクエリがありません。", "warn");
+            return;
+        }
+
+        _busy = true;
+        _cts.Dispose();
+        _cts = new CancellationTokenSource();
+        StateHasChanged();
+
+        var report = new StringBuilder();
+        report.Append($"## 評価レポート ({DateTime.Now:yyyy-MM-dd HH:mm})\n");
+        report.Append($"モード: {Cfg.RetrievalMode} / LLM: {(Router.IsHttpMode ? Router.HttpEndpoint : Cfg.LlmModelId)} [{LlmEngine.Device ?? "http"}]\n\n");
+
+        try
+        {
+            var n = 0;
+            foreach (var q in queries)
+            {
+                n++;
+                _thinking = $"評価中 {n}/{queries.Count}: {q.Query}";
+                StateHasChanged();
+
+                await AppendEvalRunAsync(report, $"Q{n}", q.Query, q.Note, []);
+
+                if (!string.IsNullOrWhiteSpace(q.FollowUp))
+                {
+                    // Re-run the follow-up with the first exchange as history so
+                    // the anaphora-triggered query rewrite path gets exercised.
+                    var firstAnswer = _evalLastAnswer;
+                    _thinking = $"評価中 {n}/{queries.Count} (フォローアップ): {q.FollowUp}";
+                    StateHasChanged();
+                    await AppendEvalRunAsync(report, $"Q{n}f", q.FollowUp, "フォローアップ",
+                        [new ChatMessage("user", q.Query), new ChatMessage("assistant", firstAnswer)]);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            report.Append("\n⏹ 途中で停止されました\n");
+        }
+        finally
+        {
+            _busy = false;
+            _thinking = null;
+        }
+
+        // One copyable block: keep it as plain preformatted text, not rendered markdown.
+        Print($"<pre class='eval-report'>{EscapeHtml(report.ToString())}</pre>", "debug");
+        PrintBlank();
+        Print("評価が完了しました。上のレポートをコピーしてルーブリック採点してください。", "ok");
+        StateHasChanged();
+        await FocusInputAsync();
+    }
+
+    private string _evalLastAnswer = "";
+
+    private async Task AppendEvalRunAsync(
+        StringBuilder report, string label, string query, string? note, List<ChatMessage> history)
+    {
+        var sw     = System.Diagnostics.Stopwatch.StartNew();
+        var ttftMs = 0.0;
+        var warned = false;
+        var answer = "";
+
+        var refs = await Rag.RunAsync(
+            query, history,
+            onToken: _ =>
+            {
+                if (ttftMs == 0) ttftMs = sw.Elapsed.TotalMilliseconds;
+                return ValueTask.CompletedTask;
+            },
+            onCompleted: full => answer = full,
+            onStatus: msg => { _thinking = $"[{label}] {msg}"; StateHasChanged(); },
+            onWarning: _ => warned = true,
+            ct: _cts.Token);
+
+        sw.Stop();
+        _evalLastAnswer = answer;
+
+        report.Append($"### {label}: {query}{(note is null ? "" : $"  ({note})")}\n");
+        for (var i = 0; i < refs.Count; i++)
+        {
+            var date = refs[i].Date.Length >= 10 ? refs[i].Date[..10] : refs[i].Date;
+            report.Append($"- 参照[{i + 1}] {refs[i].Title} ({date})\n");
+        }
+        if (refs.Count == 0) report.Append("- 参照なし\n");
+        report.Append($"- 接地: {(warned ? "⚠ 警告あり" : "OK")} / TTFT: {ttftMs / 1000:F1}s / 合計: {sw.Elapsed.TotalSeconds:F1}s\n");
+        report.Append($"- 回答: {answer.ReplaceLineEndings(" ")}\n\n");
     }
 
     // Link helper — href is always a trusted literal we author below.

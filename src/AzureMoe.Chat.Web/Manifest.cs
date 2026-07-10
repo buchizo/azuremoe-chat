@@ -10,6 +10,7 @@ public sealed record Manifest
     [JsonPropertyName("engineVersion")]  public string? EngineVersion  { get; init; }
     [JsonPropertyName("embeddingModel")] public string? EmbeddingModel { get; init; }
     [JsonPropertyName("embeddingDim")]   public int    EmbeddingDim   { get; init; }
+    [JsonPropertyName("embeddingDtype")] public string? EmbeddingDtype { get; init; }
     [JsonPropertyName("databaseFile")]   public string? DatabaseFile   { get; init; }
     [JsonPropertyName("databaseBytes")]  public long   DatabaseBytes  { get; init; }
     [JsonPropertyName("databaseSha256")] public string? DatabaseSha256 { get; init; }

@@ -1,0 +1,17 @@
+[
+  { "query": "Azure Functions の最近のアップデートを教えて", "note": "特定サービス" },
+  { "query": "Azure OpenAI Service で新しく追加された機能は？", "note": "特定サービス" },
+  { "query": "App Service に関する更新情報はある？", "note": "特定サービス" },
+  { "query": "2026年6月のAzureアップデートをまとめて", "note": "ハード日付" },
+  { "query": "2026年5月に GA になった機能は？", "note": "ハード日付" },
+  { "query": "最近のAI系の更新は？", "note": "ソフト日付" },
+  { "query": "ここ最近のセキュリティ関連のアップデートを教えて", "note": "ソフト日付" },
+  { "query": "Azure Kubernetes Service の新機能を箇条書きで教えて", "note": "複数列挙" },
+  { "query": "ストレージ関連のアップデートを一覧にして", "note": "複数列挙" },
+  { "query": "Azure Container Apps の新機能は？", "followUp": "それはいつから使えるの？", "note": "照応フォローアップ" },
+  { "query": "AWS Lambda の料金は？", "note": "コーパス外（載っていなかった が正）" },
+  { "query": "Windows 11 のインストール方法を教えて", "note": "コーパス外（載っていなかった が正）" },
+  { "query": "Copilot", "note": "曖昧キーワード" },
+  { "query": "ネットワーク", "note": "曖昧キーワード" },
+  { "query": "リタイア予定のサービスや機能はある？", "note": "一般" }
+]

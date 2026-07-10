@@ -33,11 +33,20 @@ public sealed class RagPipeline
     }
 
     // ── Mode-aware context budget ───────────────────────────────────────────
-    // HTTP mode (20B+ models) gets full settings; local WASM (2B) gets tighter
-    // budgets to avoid "lost in the middle" and reduce instruction-following load.
+    // HTTP mode (20B+ models) gets full settings; the local model gets the
+    // Local* budgets. On the WASM fallback (no WebGPU) prefill runs at tens of
+    // tokens/sec, so the budget is clamped further to keep time-to-first-token
+    // tolerable.
     private bool IsHttpMode         => _llm.Device == "http";
-    private int  EffRagTopK         => IsHttpMode ? _cfg.RagTopK         : _cfg.LocalRagTopK;
-    private int  EffMaxContextChars => IsHttpMode ? _cfg.MaxContextChars  : _cfg.LocalMaxContextChars;
+    private bool IsWasmDevice       => _llm.Device == "wasm";
+    private const int WasmMaxContextChars = 2800;
+    private const int WasmMaxTopK         = 4;
+    private int  EffRagTopK         => IsHttpMode ? _cfg.RagTopK
+                                     : IsWasmDevice ? Math.Min(_cfg.LocalRagTopK, WasmMaxTopK)
+                                     : _cfg.LocalRagTopK;
+    private int  EffMaxContextChars => IsHttpMode ? _cfg.MaxContextChars
+                                     : IsWasmDevice ? Math.Min(_cfg.LocalMaxContextChars, WasmMaxContextChars)
+                                     : _cfg.LocalMaxContextChars;
     private int  EffPerRefMaxChars  => IsHttpMode ? 2500                  : _cfg.LocalPerRefMaxChars;
 
     public async ValueTask<IReadOnlyList<ChunkResult>> RunAsync(
@@ -70,8 +79,8 @@ public sealed class RagPipeline
 
         var sources = _cfg.RetrievalMode switch
         {
-            RetrievalMode.Deep => await RetrieveDeepAsync(userQuery, Status, onDebug, ct),
-            _                  => await RetrieveOnceAsync(userQuery, Status, onDebug, ct),
+            RetrievalMode.Deep => await RetrieveDeepAsync(userQuery, trimmed, Status, onDebug, ct),
+            _                  => await RetrieveOnceAsync(userQuery, trimmed, Status, onDebug, ct),
         };
 
         // Merge chunks from the same blog post (same URL) into one numbered
@@ -106,7 +115,7 @@ public sealed class RagPipeline
             if (onDebug is not null) Debug(FormatPromptDebug("▶ LLM 回答生成", msgs));
             var text = "";
             await _llm.ChatAsync(msgs, onToken, full => text = full, _cfg.LlmMaxNewTokens, ct);
-            text = SanitizeAnswer(text);
+            text = NormalizeCitations(SanitizeAnswer(text), references.Count);
             if (onDebug is not null) Debug(FormatResponseDebug("LLM 応答", text));
             return text;
         }
@@ -122,9 +131,12 @@ public sealed class RagPipeline
         var answer   = await GenerateAsync(BuildMessages(generationHistory, userQuery, context, dateLabel, strict: false));
         var grounded = true;
 
-        // Grounding check (all modes) so the model can't quietly fall back to
-        // general knowledge. On failure, regenerate once with a stricter prompt.
-        if (_cfg.VerifyGrounding && !string.IsNullOrWhiteSpace(answer))
+        // Grounding check so the model can't quietly fall back to general
+        // knowledge. On failure, regenerate once with a stricter prompt.
+        // Skipped on the WASM fallback: the extra prefill pass costs 25-60 s
+        // there, versus a few seconds on WebGPU.
+        var verifyGrounding = _cfg.VerifyGrounding && !IsWasmDevice;
+        if (verifyGrounding && !string.IsNullOrWhiteSpace(answer))
         {
             Status("回答が参考情報に基づいているか確認しています…");
             if (onDebug is not null) Debug("[debug] ▶ グラウンディング確認");
@@ -147,7 +159,7 @@ public sealed class RagPipeline
 
         // Commit the final answer once, then warn if it still isn't grounded.
         onCompleted?.Invoke(answer);
-        if (_cfg.VerifyGrounding && !grounded)
+        if (verifyGrounding && !grounded)
             onWarning?.Invoke(
                 "⚠ この回答には、参考情報だけでは確認できない内容が含まれている可能性があります。" +
                 "下の参考記事で裏付けを確認してね。");
@@ -218,6 +230,28 @@ public sealed class RagPipeline
         return s.Trim();
     }
 
+    // Citation variants a small model produces: 【1】, ［1］, [ 1 ], [1, 2], [1、2].
+    private static readonly Regex _citationVariant = new(
+        @"[\[［【]\s*(\d+(?:\s*[,、]\s*\d+)*)\s*[\]］】]", RegexOptions.Compiled);
+
+    /// <summary>Normalise citation markers to the canonical "[1] [2]" form and
+    /// drop ordinals beyond the actual reference count (hallucinated numbers).
+    /// Missing citations are left as-is — the UI's source list stays
+    /// authoritative; model citations are best-effort decoration.</summary>
+    private static string NormalizeCitations(string text, int refCount)
+    {
+        if (string.IsNullOrEmpty(text) || refCount <= 0) return text;
+        return _citationVariant.Replace(text, m =>
+        {
+            var nums = m.Groups[1].Value
+                .Split([',', '、'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(s => int.TryParse(s, out var n) ? n : 0)
+                .Where(n => n >= 1 && n <= refCount)
+                .Distinct();
+            return string.Join(" ", nums.Select(n => $"[{n}]"));
+        });
+    }
+
     // Max chars of context to send to the grounding check. The full 6 000-char
     // context would force the model to process ~1 500 tokens just to output "OK"
     // or "NG". Truncating to 2 000 chars cuts ~1 000 input tokens per check while
@@ -241,7 +275,7 @@ public sealed class RagPipeline
         };
 
         if (onDebug is not null) onDebug(FormatPromptDebug("LLM グラウンディング確認プロンプト", messages));
-        var raw = (await _llm.CompleteAsync(messages, 8, ct)).ToUpperInvariant();
+        var raw = (await _llm.CompleteAsync(messages, _cfg.LlmEvalMaxTokens, ct)).ToUpperInvariant();
         // Treat only an explicit NG (without a competing OK) as ungrounded.
         return !(raw.Contains("NG") && !raw.Contains("OK"));
     }
@@ -249,25 +283,90 @@ public sealed class RagPipeline
     // ── Fast / Normal: one recall pass ────────────────────────────────────────
 
     private async ValueTask<IReadOnlyList<ChunkResult>> RetrieveOnceAsync(
-        string userQuery, Action<string> status, Action<string>? onDebug, CancellationToken ct)
+        string userQuery, IReadOnlyList<ChatMessage> history,
+        Action<string> status, Action<string>? onDebug, CancellationToken ct)
     {
+        var searchQuery = await MaybeRewriteQueryAsync(userQuery, history, status, onDebug, ct);
         status("関連する記事を検索しています…");
         if (onDebug is not null) onDebug("[debug] ▶ ベクトル検索・グラフ展開");
-        var opt   = OptionsFor(_cfg.RetrievalMode);
-        var origQ = _analyzer.Analyze(userQuery);
-        return await _ragInterop.RetrieveAsync(userQuery, userQuery, origQ, origQ, opt, _cfg.RetrievalMode, onDebug, ct);
+        var opt     = OptionsFor(_cfg.RetrievalMode);
+        var origQ   = _analyzer.Analyze(userQuery);
+        var searchQ = searchQuery == userQuery ? origQ : _analyzer.Analyze(searchQuery);
+        return await _ragInterop.RetrieveAsync(userQuery, searchQuery, origQ, searchQ, opt, _cfg.RetrievalMode, onDebug, ct);
     }
 
     // ── Deep: multi-round recall (all rounds handled inside rag-worker.js) ────
 
     private async ValueTask<IReadOnlyList<ChunkResult>> RetrieveDeepAsync(
-        string userQuery, Action<string> status, Action<string>? onDebug, CancellationToken ct)
+        string userQuery, IReadOnlyList<ChatMessage> history,
+        Action<string> status, Action<string>? onDebug, CancellationToken ct)
     {
+        var searchQuery = await MaybeRewriteQueryAsync(userQuery, history, status, onDebug, ct);
         status("関連する記事を検索しています…");
         if (onDebug is not null) onDebug("[debug] ▶ ベクトル検索・グラフ展開 (Deep)");
-        var opt   = OptionsFor(RetrievalMode.Deep);
-        var origQ = _analyzer.Analyze(userQuery);
-        return await _ragInterop.RetrieveAsync(userQuery, userQuery, origQ, origQ, opt, RetrievalMode.Deep, onDebug, ct);
+        var opt     = OptionsFor(RetrievalMode.Deep);
+        var origQ   = _analyzer.Analyze(userQuery);
+        var searchQ = searchQuery == userQuery ? origQ : _analyzer.Analyze(searchQuery);
+        return await _ragInterop.RetrieveAsync(userQuery, searchQuery, origQ, searchQ, opt, RetrievalMode.Deep, onDebug, ct);
+    }
+
+    // ── History-aware query rewrite (conditional) ─────────────────────────────
+
+    // Follow-up phrasings whose raw text is a useless search key ("それの料金は？").
+    private static readonly Regex _anaphoraMarker = new(
+        "それ|これ|あれ|その|この|さっき|先ほど|前の|他に|ほかに|続き|もっと",
+        RegexOptions.Compiled);
+
+    /// <summary>Rewrite the query into a self-contained search key using the
+    /// local LLM — but only when there is history AND the query looks anaphoric
+    /// (an unconditional rewrite costs an extra LLM round-trip per question and
+    /// can mangle an already-good query). Falls back to the raw query on any
+    /// suspicious output.</summary>
+    private async ValueTask<string> MaybeRewriteQueryAsync(
+        string userQuery, IReadOnlyList<ChatMessage> history,
+        Action<string> status, Action<string>? onDebug, CancellationToken ct)
+    {
+        if (history.Count == 0 || !_llm.IsLoaded) return userQuery;
+
+        var anaphoric = _anaphoraMarker.IsMatch(userQuery)
+                        || _analyzer.Analyze(userQuery).Keywords.Count == 0
+                        || userQuery.Length < 12;
+        if (!anaphoric) return userQuery;
+
+        status("質問を検索用に整理しています…");
+        var convo = new StringBuilder();
+        foreach (var m in history.Skip(Math.Max(0, history.Count - 4)))   // last 2 turns
+        {
+            var content = m.Content.Length > 200 ? m.Content[..200] + "…" : m.Content;
+            convo.Append(m.Role == "user" ? "ユーザー: " : "アシスタント: ").Append(content).Append('\n');
+        }
+
+        var messages = new List<ChatMessage>
+        {
+            new("system",
+                "直前の会話をふまえて、ユーザーの質問を単独で意味が通る日本語の検索クエリ1行に書き換えてください。" +
+                "「それ」「この」などの指示語は会話に出てきた具体的な名称に置き換えます。" +
+                "説明や引用符は書かず、検索クエリだけを出力してください。"),
+            new("user", $"## 会話\n{convo}\n## 質問\n{userQuery}\n\n## 検索クエリ"),
+        };
+
+        try
+        {
+            var raw = (await _llm.CompleteAsync(messages, _cfg.LlmRewriteMaxTokens, ct)).Trim();
+            var line = raw.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                          .FirstOrDefault() ?? "";
+            line = line.Trim('"', '「', '」', '『', '』', ' ');
+            // Guards: empty, runaway, or leaked role tags → keep the raw query.
+            var ok = line.Length is > 0 and <= 120
+                     && !line.Contains("ユーザー:") && !line.Contains("アシスタント:");
+            if (onDebug is not null)
+                onDebug($"[debug] クエリリライト: \"{userQuery}\" → \"{(ok ? line : "(棄却: " + line + ")")}\"");
+            return ok ? line : userQuery;
+        }
+        catch
+        {
+            return userQuery;   // rewrite is best-effort; retrieval must not fail
+        }
     }
 
     // ── Debug formatting ───────────────────────────────────────────────────
@@ -310,7 +409,7 @@ public sealed class RagPipeline
             IncludeRelated: true, ExpansionLimit: 14, DateOverFetch: 600),
         // Normal: balanced graph expansion.
         _ => new RetrievalOptions(
-            FinalTopK: Math.Max(2, EffRagTopK - 1), VectorTopK: 18, UseGraph: true,
+            FinalTopK: EffRagTopK, VectorTopK: 24, UseGraph: true,
             IncludeRelated: false, ExpansionLimit: 10, DateOverFetch: 400),
     };
 
@@ -331,9 +430,10 @@ public sealed class RagPipeline
         var messages = new List<ChatMessage> { new("system", sysPrompt) };
         messages.AddRange(history);
 
-        // Question first so the model anchors on intent before reading context.
+        // Question at both ends: stated first so the model anchors on intent
+        // before reading context, and restated after the context so it sits at
+        // the generation point (small models weight the end of the prompt most).
         // Context is labelled "システム取得" to distinguish it from user input.
-        // Additional constraints (strict / dateLabel) follow the context.
         string userContent;
         if (string.IsNullOrWhiteSpace(context))
         {
@@ -351,6 +451,7 @@ public sealed class RagPipeline
             if (!string.IsNullOrEmpty(dateLabel))
                 sb.Append($"## 重要な制約\nユーザーは「{dateLabel}」の情報を求めています。参考情報もすべて「{dateLabel}」のものです。")
                   .Append($"回答に書く年・月は必ず「{dateLabel}」に統一し、それ以外の年（2025年・2023年など）は絶対に書かないこと。\n\n");
+            sb.Append("## 上記の参考情報だけを使って、次の質問に答えてください\n").Append(userQuery);
             userContent = sb.ToString().TrimEnd();
         }
         messages.Add(new ChatMessage("user", userContent));
@@ -383,11 +484,17 @@ public sealed class RagPipeline
             var list = groups[key];
             var best = list[0];   // chunks arrive in ranked order; first is best
             var sb = new StringBuilder();
+            var seenBlocks = new HashSet<string>();
             foreach (var c in list)
             {
                 if (sb.Length >= perRefMaxChars) break;
+                // Small-to-big: prefer the richer neighbour-window context over the
+                // bare retrieval chunk. Sibling bullets from the same section share
+                // an identical ContextText, so dedupe before concatenating.
+                var block = StripUrls(string.IsNullOrEmpty(c.ContextText) ? c.Text : c.ContextText);
+                if (!seenBlocks.Add(block)) continue;
                 if (sb.Length > 0) sb.Append("\n\n");
-                sb.Append(StripUrls(c.Text));
+                sb.Append(block);
             }
             var merged = sb.Length > perRefMaxChars ? sb.ToString(0, perRefMaxChars) : sb.ToString();
             result.Add(best with { Text = merged, Distance = list.Min(x => x.Distance) });
@@ -397,25 +504,26 @@ public sealed class RagPipeline
 
     private static string BuildContext(IReadOnlyList<ChunkResult> chunks, int maxContextChars)
     {
-        var sb   = new StringBuilder();
-        var used = 0;
+        // Select references in rank order until the budget is exhausted. The
+        // header carries only what the model needs to cite (number/title/date);
+        // similarity scores and URLs are display concerns, not prompt material.
+        var picked = new List<string>();
+        var used   = 0;
 
         for (var i = 0; i < chunks.Count; i++)
         {
-            var c   = chunks[i];
-            var sim = (1.0 - c.Distance).ToString("F3");
-            var date = FormatDateJst(c.Date);
-            var header = $"[{i + 1}] {c.Title} ({date}) — 類似度 {sim}\n{c.Url}\n\n";
-            var body = c.Text + "\n\n";
-
-            if (used + header.Length + body.Length > maxContextChars && used > 0)
+            var c     = chunks[i];
+            var block = $"### [{i + 1}] {c.Title}（{FormatDateJst(c.Date)}）\n{c.Text}";
+            if (used + block.Length > maxContextChars && used > 0)
                 break;
-
-            sb.Append(header);
-            sb.Append(body);
-            used += header.Length + body.Length;
+            picked.Add(block);
+            used += block.Length;
         }
 
-        return sb.ToString().TrimEnd();
+        // Emit least-relevant first: the strongest evidence sits right before the
+        // restated question at the end of the user turn (small-model recency
+        // bias). Numbering stays rank-based so [n] matches the UI's source list.
+        picked.Reverse();
+        return string.Join("\n\n---\n\n", picked);
     }
 }

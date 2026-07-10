@@ -1,4 +1,4 @@
-namespace AzureMoe.Chat.Ingest;
+﻿namespace AzureMoe.Chat.Ingest;
 
 /// <summary>
 /// All ingest configuration. Bound from (in priority order) command line,
@@ -41,18 +41,30 @@ public sealed class IngestOptions
     /// </summary>
     public string? LlmApiKey { get; set; }
 
+    /// <summary>Skip the LLM extraction step; build the graph from tags/structure only.
+    /// Useful for testing the rest of the pipeline without a running LLM.</summary>
+    public bool NoLlm { get; set; }
+
     // --- Embeddings (multilingual-e5-small, ONNX local) -------------------
 
     /// <summary>
     /// Directory containing the Xenova/multilingual-e5-small ONNX model files.
     /// Expected layout:
     ///   {ModelDir}/tokenizer.json
-    ///   {ModelDir}/onnx/model_quantized.onnx  (preferred, ~34 MB)
-    ///   {ModelDir}/onnx/model.onnx             (fallback, ~117 MB)
+    ///   {ModelDir}/onnx/model_quantized.onnx  (q8/INT8, ~34 MB, default)
+    ///   {ModelDir}/onnx/model_q4.onnx          (q4/INT4, ~17 MB, if available)
+    ///   {ModelDir}/onnx/model.onnx             (fp32, ~117 MB)
     ///
     /// Download from HuggingFace: Xenova/multilingual-e5-small
     /// </summary>
     public string ModelDir { get; set; } = "model/Xenova/multilingual-e5-small";
+
+    /// <summary>
+    /// ONNX quantization dtype. Must match the browser-side EmbeddingDtype in
+    /// appsettings.json so query and passage vectors share the same space.
+    /// Supported: "q8" (INT8, default), "q4" (INT4), "fp16", "fp32".
+    /// </summary>
+    public string EmbeddingDtype { get; set; } = "q4";
 
     // --- Output ------------------------------------------------------------
 

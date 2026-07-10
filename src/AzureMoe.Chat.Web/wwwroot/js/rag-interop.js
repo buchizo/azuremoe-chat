@@ -45,10 +45,10 @@ function send(type, payload, onProgress, transfer) {
 // DotNetObjectReference cannot be cloned via postMessage, so the worker sends
 // plain progress messages back and the onProgress callback invokes dotnetRef here.
 // skipEmbedding=true loads the DB only (keyword-search mode for memory-constrained devices).
-export async function initRag(dbBytes, embeddingModelId, dotnetRef, skipEmbedding = false) {
+export async function initRag(dbBytes, embeddingModelId, embeddingDtype, dotnetRef, skipEmbedding = false) {
   return send(
     "init",
-    { dbBytes: dbBytes.buffer, embeddingModelId, skipEmbedding },
+    { dbBytes: dbBytes.buffer, embeddingModelId, embeddingDtype, skipEmbedding },
     (p) => dotnetRef.invokeMethodAsync("OnRagProgress", p.stage ?? "", p.file ?? "", p.pct ?? 0),
     [dbBytes.buffer]);
 }

@@ -9,11 +9,8 @@ namespace AzureMoe.Chat.Ingest;
 /// <summary>
 /// Calls a local OpenAI-compatible LLM to extract entities, relationships,
 /// and Azure service names from a Japanese blog chunk.
-///
-/// JSON mode (<c>response_format: json_object</c>) is used together with a
-/// schema description embedded in the system prompt so the model returns a
-/// machine-readable structure regardless of which local server is used
-/// (Ollama, LM Studio, llama.cpp, vLLM, …).
+/// JSON structure is enforced via the system prompt only — no response_format
+/// constraint — so any OpenAI-compatible server works regardless of JSON-mode support.
 /// </summary>
 public sealed class EntityExtractor : IDisposable
 {
@@ -63,39 +60,82 @@ public sealed class EntityExtractor : IDisposable
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
+    private int _parseFailures;
+
+    /// <summary>チャンク数ベースの JSON パース失敗数（1回のリトライ後も失敗したもの）。
+    /// ingest 終了時にサマリ表示し、グラフエッジの静かな欠落を可視化する。</summary>
+    public int ParseFailureCount => _parseFailures;
+
     public async Task<Extraction> ExtractAsync(string chunkText, CancellationToken ct = default)
     {
+        // 失敗はグラフエッジの欠落として静かに効いてくるので、1回だけ念押し付きでリトライする。
+        var extraction = await TryExtractAsync(chunkText, remind: false, ct)
+                      ?? await TryExtractAsync(chunkText, remind: true,  ct);
+        if (extraction is not null) return extraction;
+
+        Interlocked.Increment(ref _parseFailures);
+        Console.Error.WriteLine("\n  [warn] JSON パース失敗 (リトライ後もスキップ)");
+        return new Extraction([], [], []);
+    }
+
+    private async Task<Extraction?> TryExtractAsync(string chunkText, bool remind, CancellationToken ct)
+    {
+        // "/no_think" は Ollama 経由の qwen3 の思考モードを無効化するソフトスイッチ。
+        // 思考テキストが出力トークン予算を食って JSON が途中で切れるのを防ぐ。
+        // 対応しないモデルではただの末尾テキストとして無視される。
+        var user = chunkText + "\n\n/no_think";
+        if (remind)
+            user += "\n\n必ず JSON オブジェクトのみを出力してください。説明文・思考過程・コードフェンスは不要です。";
+
         List<ChatMessage> messages =
         [
             new SystemChatMessage(SystemPrompt),
-            new UserChatMessage(chunkText),
+            new UserChatMessage(user),
         ];
-        var completionOptions = new ChatCompletionOptions
-        {
-            ResponseFormat = ChatResponseFormat.CreateJsonObjectFormat(),
-        };
 
+        var options = new ChatCompletionOptions { MaxOutputTokenCount = 2048 };
+        var result = await _chat.CompleteChatAsync(messages, options, ct);
+        var raw = result.Value?.Content?.FirstOrDefault()?.Text;
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        var json = ExtractJson(StripThinking(raw));
         try
         {
-            var result = await _chat.CompleteChatAsync(messages, completionOptions, ct);
-            var json   = result.Value?.Content?.FirstOrDefault()?.Text;
-            if (string.IsNullOrWhiteSpace(json)) return Empty;
-
             var extraction = JsonSerializer.Deserialize<Extraction>(json, JsonOpts);
-            if (extraction == null) return Empty;
+            if (extraction is null) return null;
 
             // Guard against null collections from partial JSON (LLM may omit fields).
             return extraction with
             {
                 Entities      = extraction.Entities      ?? [],
                 Relationships = extraction.Relationships ?? [],
+                AzureServices = extraction.AzureServices ?? [],
             };
         }
-        catch (OperationCanceledException) { throw; }
-        catch { return Empty; }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
-    private static readonly Extraction Empty = new([], [], []);
+    // 思考モードのモデル (qwen3 など) が <think>...</think> を先頭に出力した場合に除去する。
+    // ExtractJson の first-{ ヒューリスティックが思考テキスト内の brace を拾うのを防ぐ。
+    private static string StripThinking(string raw)
+    {
+        var end = raw.LastIndexOf("</think>", StringComparison.OrdinalIgnoreCase);
+        return end >= 0 ? raw[(end + "</think>".Length)..] : raw;
+    }
+
+    // モデルが JSON を ```json ... ``` や ``` ... ``` で囲んで返す場合に抽出する。
+    // 囲みがなければ raw をそのまま返す。
+    private static string ExtractJson(string raw)
+    {
+        var start = raw.IndexOf('{');
+        var end   = raw.LastIndexOf('}');
+        if (start >= 0 && end > start)
+            return raw[start..(end + 1)];
+        return raw;
+    }
 
     public void Dispose() { }
 }

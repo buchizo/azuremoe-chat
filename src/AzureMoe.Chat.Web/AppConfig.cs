@@ -47,6 +47,10 @@ public sealed class AppConfig
     // ── Embedding ──────────────────────────────────────────────────────────
     // Must match the model used during ingest (same vector space).
     public string EmbeddingModelId { get; set; } = "Xenova/multilingual-e5-small";
+    // transformers.js dtype for the embedding model. Must match the dtype used
+    // during ingest so query and passage vectors share the same quantized space.
+    // Supported: "q8" (INT8, default), "q4" (INT4), "fp32".
+    public string EmbeddingDtype   { get; set; } = "q8";
 
     // ── RAG ───────────────────────────────────────────────────────────────
     public RetrievalMode RetrievalMode { get; set; } = RetrievalMode.Normal;

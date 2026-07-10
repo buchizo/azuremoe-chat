@@ -17,7 +17,7 @@ if (args.Length > 0 && args[0].Equals("inspect", StringComparison.OrdinalIgnoreC
 // `append` subcommand — fetch one blog post from a URL and append it to an
 // existing .lbdb, copying the source DB to a dated output file first.
 //   dotnet run --project src/AzureMoe.Chat.Ingest -- append <url> <sourceDbPath>
-//   ... append <url> <sourceDbPath> [--OutDir <dir>] [--ModelDir <dir>] [--Override] [LLM options]
+//   ... append <url> <sourceDbPath> [--OutDir <dir>] [--ModelDir <dir>] [--NoLlm] [--Override] [LLM options]
 // ---------------------------------------------------------------------------
 if (args.Length > 0 && args[0].Equals("append", StringComparison.OrdinalIgnoreCase))
     return await RunAppendAsync(args[1..]);
@@ -25,14 +25,22 @@ if (args.Length > 0 && args[0].Equals("append", StringComparison.OrdinalIgnoreCa
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+// --NoLlm is a bare flag (no value follows it). The default command-line
+// config provider treats "--Key" as needing a value and either swallows the
+// next token as its value or binds an empty string to `false` silently — so
+// it's parsed by hand here rather than left to the binder.
+var noLlm = args.Any(a => a.Equals("--NoLlm", StringComparison.OrdinalIgnoreCase));
+var configArgs = args.Where(a => !a.Equals("--NoLlm", StringComparison.OrdinalIgnoreCase)).ToArray();
+
 var config = new ConfigurationBuilder()
     .AddJsonFile("appsettings.json", optional: true)
     .AddEnvironmentVariables()
-    .AddCommandLine(args)
+    .AddCommandLine(configArgs)
     .Build();
 
 var opt = new IngestOptions();
 config.Bind(opt);
+opt.NoLlm = noLlm;
 
 // Conventional env var names for LLM overrides.
 if (Environment.GetEnvironmentVariable("LLM_BASE_URL") is { } envUrl)   opt.LlmBaseUrl = envUrl;
@@ -51,8 +59,11 @@ var manifestPath = Path.Combine(opt.OutDir, "manifest.json");
 Console.WriteLine($"XML ディレクトリ : {Path.GetFullPath(opt.XmlDir)}");
 Console.WriteLine($"出力先           : {Path.GetFullPath(opt.OutDir)}");
 Console.WriteLine($"DB               : {dbFileName}");
-Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}");
-Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
+Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}  [{opt.EmbeddingDtype}]");
+if (opt.NoLlm)
+    Console.WriteLine($"LLM              : (スキップ)");
+else
+    Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
 Console.WriteLine();
 
 using var cts = new CancellationTokenSource();
@@ -117,59 +128,69 @@ try
     }
     Console.WriteLine($" {chunks.Count} チャンク");
 
+    // Small-to-big: 生成用の周辺コンテキスト (contextText) を付与。
+    // 埋め込み (検索キー) は Text のみで細粒度のまま。
+    ContextEnricher.Enrich(chunks);
+
     // -----------------------------------------------------------------------
     // Step 3: Embed (multilingual-e5-small ONNX, local)
     // -----------------------------------------------------------------------
-    Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、モデル: {opt.ModelDir})...");
-    using var embedder = new E5Embedder(opt.ModelDir);
+    Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、モデル: {opt.ModelDir} [{opt.EmbeddingDtype}])...");
+    using var embedder = new E5Embedder(opt.ModelDir, opt.EmbeddingDtype);
 
     // Update post chunks: prepend service name so the vector captures both the
     // service identity and the update content.
-    // Article post chunks: prepend the post title (same as before).
+    // Article post chunks: prepend the post title (+ section heading when known).
     var titleById = posts.ToDictionary(p => p.Id, p => p.Title);
     for (var i = 0; i < chunks.Count; i++)
     {
         cts.Token.ThrowIfCancellationRequested();
-        string embedInput;
-        if (chunks[i].ChunkType == "update_item" && !string.IsNullOrEmpty(chunks[i].ServiceName))
-            embedInput = $"{chunks[i].ServiceName}\n\n{chunks[i].Text}";
-        else
-        {
-            var title = titleById.GetValueOrDefault(chunks[i].PostId, "");
-            embedInput = string.IsNullOrEmpty(title) ? chunks[i].Text : $"{title}\n\n{chunks[i].Text}";
-        }
-        chunks[i].Embedding = embedder.EmbedPassage(embedInput);
+        chunks[i].Embedding = embedder.EmbedPassage(
+            BuildEmbedInput(chunks[i], titleById.GetValueOrDefault(chunks[i].PostId, "")));
         if ((i + 1) % 20 == 0 || i == chunks.Count - 1)
             Console.Write($"\r  [{i + 1}/{chunks.Count}]  dim={embedder.Dimension}  ");
     }
     Console.WriteLine("完了");
+    if (embedder.TruncatedCount > 0)
+        Console.WriteLine($"  [warn] 512トークン超過で末尾切り捨て: {embedder.TruncatedCount}/{chunks.Count} チャンク");
 
     // -----------------------------------------------------------------------
-    // Step 4: Extract entities + Azure service names
+    // Step 4: Extract entities + Azure service names (unless --NoLlm)
     // -----------------------------------------------------------------------
     var extractions = new Dictionary<long, Extraction>();
-    Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
-    Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
-    using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
-
-    for (var i = 0; i < chunks.Count; i++)
+    if (opt.NoLlm)
     {
-        cts.Token.ThrowIfCancellationRequested();
-        try
-        {
-            extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
-            extractions[chunks[i].Id] = new Extraction([], [], []);
-        }
-
-        if ((i + 1) % 5 == 0 || i == chunks.Count - 1)
-            Console.Write($"\r  [{i + 1}/{chunks.Count}]  ");
+        Console.WriteLine("エンティティ・サービス名抽出: スキップ (--NoLlm)");
     }
-    Console.WriteLine("完了");
+    else
+    {
+        Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
+        Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
+        using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
+
+        // 抽出はチャンク単位で独立なので、並列数を絞って LLM 呼び出しを重ねる
+        // （再インジェスト全体のボトルネック）。結果は id キーなので順序不問。
+        {
+            using var gate = new SemaphoreSlim(3);
+            var done = 0;
+            await Task.WhenAll(chunks.Select(async chunk =>
+            {
+                await gate.WaitAsync(cts.Token);
+                try
+                {
+                    var extraction = await extractor.ExtractAsync(chunk.Text, cts.Token);
+                    lock (extractions) extractions[chunk.Id] = extraction;
+                    var d = Interlocked.Increment(ref done);
+                    if (d % 5 == 0 || d == chunks.Count)
+                        Console.Write($"\r  [{d}/{chunks.Count}]  ");
+                }
+                finally { gate.Release(); }
+            }));
+        }
+        Console.WriteLine("完了");
+        if (extractor.ParseFailureCount > 0)
+            Console.WriteLine($"  [warn] JSON パース失敗: {extractor.ParseFailureCount}/{chunks.Count} チャンク（該当チャンクはグラフエッジなしで続行）");
+    }
 
     // -----------------------------------------------------------------------
     // Step 5: Build graph database
@@ -198,6 +219,7 @@ try
         EngineVersion  = GraphSchema.EngineVersion,
         EmbeddingModel = GraphSchema.EmbeddingModel,
         EmbeddingDim   = embedder.Dimension > 0 ? embedder.Dimension : GraphSchema.EmbeddingDim,
+        EmbeddingDtype = opt.EmbeddingDtype,
         DatabaseFile   = dbFileName,
         DatabaseBytes  = dbBytes,
         DatabaseSha256 = dbSha256,
@@ -231,13 +253,32 @@ catch (Exception ex)
 }
 
 // ---------------------------------------------------------------------------
+// Embedding input (shared by build and append)
+// ---------------------------------------------------------------------------
+// Update items: the service name carries the identity of a short bullet.
+// Articles: post title, plus the section heading when there is one, so the
+// vector captures which part of the article the chunk came from. Dates are
+// deliberately NOT embedded — date filtering is structural (year/month columns)
+// and e5-small handles numerals poorly.
+static string BuildEmbedInput(Chunk chunk, string postTitle)
+{
+    if (chunk.ChunkType == "update_item" && !string.IsNullOrEmpty(chunk.ServiceName))
+        return $"{chunk.ServiceName}\n\n{chunk.Text}";
+    if (string.IsNullOrEmpty(postTitle))
+        return chunk.Text;
+    return string.IsNullOrEmpty(chunk.SectionTitle)
+        ? $"{postTitle}\n\n{chunk.Text}"
+        : $"{postTitle} — {chunk.SectionTitle}\n\n{chunk.Text}";
+}
+
+// ---------------------------------------------------------------------------
 // append subcommand implementation
 // ---------------------------------------------------------------------------
 static async Task<int> RunAppendAsync(string[] rest)
 {
     // Parse positional args and flags
     string? url = null, sourceDbPath = null;
-    bool overrideMode = false;
+    bool overrideMode = false, noLlm = false;
     var configArgs = new List<string>();
 
     for (int i = 0; i < rest.Length; i++)
@@ -245,6 +286,10 @@ static async Task<int> RunAppendAsync(string[] rest)
         if (rest[i].Equals("--Override", StringComparison.OrdinalIgnoreCase))
         {
             overrideMode = true;
+        }
+        else if (rest[i].Equals("--NoLlm", StringComparison.OrdinalIgnoreCase))
+        {
+            noLlm = true;
         }
         else if (rest[i].StartsWith("--") && i + 1 < rest.Length && !rest[i + 1].StartsWith("--"))
         {
@@ -280,6 +325,7 @@ static async Task<int> RunAppendAsync(string[] rest)
         .Build();
     var opt = new IngestOptions();
     config.Bind(opt);
+    opt.NoLlm = noLlm;
     if (Environment.GetEnvironmentVariable("LLM_BASE_URL") is { } envUrl)   opt.LlmBaseUrl = envUrl;
     if (Environment.GetEnvironmentVariable("LLM_MODEL")    is { } envModel) opt.LlmModel   = envModel;
     opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
@@ -293,9 +339,12 @@ static async Task<int> RunAppendAsync(string[] rest)
     Console.WriteLine($"URL              : {url}");
     Console.WriteLine($"ソースDB         : {Path.GetFullPath(sourceDbPath)}");
     Console.WriteLine($"出力DB           : {Path.GetFullPath(dbPath)}");
-    Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}");
+    Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}  [{opt.EmbeddingDtype}]");
     Console.WriteLine($"上書きモード     : {(overrideMode ? "あり (--Override)" : "なし")}");
-    Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
+    if (opt.NoLlm)
+        Console.WriteLine($"LLM              : (スキップ)");
+    else
+        Console.WriteLine($"LLM              : {opt.LlmBaseUrl}  [{opt.LlmModel}]");
     Console.WriteLine();
 
     using var cts = new CancellationTokenSource();
@@ -409,42 +458,42 @@ static async Task<int> RunAppendAsync(string[] rest)
             }
             Console.WriteLine($" {chunks.Count} チャンク");
 
+            // Small-to-big: 生成用の周辺コンテキスト (contextText) を付与。
+            ContextEnricher.Enrich(chunks);
+
             // Step 6: Embed
-            Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク)...");
-            using var embedder = new E5Embedder(opt.ModelDir);
+            Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、dtype={opt.EmbeddingDtype})...");
+            using var embedder = new E5Embedder(opt.ModelDir, opt.EmbeddingDtype);
             for (var i = 0; i < chunks.Count; i++)
             {
                 cts.Token.ThrowIfCancellationRequested();
-                string embedInput;
-                if (chunks[i].ChunkType == "update_item" && !string.IsNullOrEmpty(chunks[i].ServiceName))
-                    embedInput = $"{chunks[i].ServiceName}\n\n{chunks[i].Text}";
-                else
-                    embedInput = string.IsNullOrEmpty(post.Title) ? chunks[i].Text : $"{post.Title}\n\n{chunks[i].Text}";
-                chunks[i].Embedding = embedder.EmbedPassage(embedInput);
+                chunks[i].Embedding = embedder.EmbedPassage(BuildEmbedInput(chunks[i], post.Title));
             }
             embeddingDim = embedder.Dimension > 0 ? embedder.Dimension : GraphSchema.EmbeddingDim;
             Console.WriteLine($"  完了 (dim={embedder.Dimension})");
+            if (embedder.TruncatedCount > 0)
+                Console.WriteLine($"  [warn] 512トークン超過で末尾切り捨て: {embedder.TruncatedCount}/{chunks.Count} チャンク");
 
-            // Step 7: Extract entities + Azure service names
+            // Step 7: Extract entities + Azure service names (unless --NoLlm)
             var extractions = new Dictionary<long, Extraction>();
-            Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
-            Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
-            using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
-            for (var i = 0; i < chunks.Count; i++)
+            if (opt.NoLlm)
             {
-                cts.Token.ThrowIfCancellationRequested();
-                try
+                Console.WriteLine("エンティティ・サービス名抽出: スキップ (--NoLlm)");
+            }
+            else
+            {
+                Console.WriteLine($"エンティティ・サービス名抽出中 ({chunks.Count} チャンク)...");
+                Console.WriteLine($"  エンドポイント: {opt.LlmBaseUrl}  モデル: {opt.LlmModel}");
+                using var extractor = new EntityExtractor(opt.LlmBaseUrl, opt.LlmModel, opt.LlmApiKey);
+                for (var i = 0; i < chunks.Count; i++)
                 {
+                    cts.Token.ThrowIfCancellationRequested();
                     extractions[chunks[i].Id] = await extractor.ExtractAsync(chunks[i].Text, cts.Token);
                 }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"\n  チャンク {i} 抽出エラー (スキップ): {ex.Message}");
-                    extractions[chunks[i].Id] = new Extraction([], [], []);
-                }
+                Console.WriteLine("  完了");
+                if (extractor.ParseFailureCount > 0)
+                    Console.WriteLine($"  [warn] JSON パース失敗: {extractor.ParseFailureCount}/{chunks.Count} チャンク");
             }
-            Console.WriteLine("  完了");
 
             // Step 8: Append to DB
             Console.WriteLine("グラフDB 追記中...");
@@ -472,6 +521,7 @@ static async Task<int> RunAppendAsync(string[] rest)
             EngineVersion  = GraphSchema.EngineVersion,
             EmbeddingModel = GraphSchema.EmbeddingModel,
             EmbeddingDim   = embeddingDim,
+            EmbeddingDtype = opt.EmbeddingDtype,
             DatabaseFile   = dbFileName,
             DatabaseBytes  = dbBytes,
             DatabaseSha256 = dbSha256,
@@ -535,7 +585,8 @@ static int RunInspect(string[] rest)
             inspector.SampleVectorSearch(
                 query,
                 Flag("--model") ?? "model/Xenova/multilingual-e5-small",
-                int.TryParse(Flag("--topk"), out var k) ? k : 8);
+                int.TryParse(Flag("--topk"), out var k) ? k : 8,
+                Flag("--dtype") ?? GraphSchema.EmbeddingDtype);
         else
             inspector.PrintStats();
 

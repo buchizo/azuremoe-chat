@@ -15,7 +15,10 @@ public sealed record ChunkResult(
     string Url,
     string Text,
     double Distance,
-    long ChunkId = 0);
+    long ChunkId = 0,
+    /// <summary>Small-to-big generation context (neighbouring bullets/chunks);
+    /// empty on a v1 database or when the chunk has no useful neighbours.</summary>
+    string ContextText = "");
 
 /// <summary>Per-mode tuning knobs for the retrieval pipeline.</summary>
 public sealed record RetrievalOptions(
@@ -65,6 +68,7 @@ public sealed class RagInterop : IAsyncDisposable
     public async ValueTask InitAsync(
         byte[] dbBytes,
         string embeddingModelId,
+        string embeddingDtype = "q8",
         IProgress<(string Stage, string File, int Pct)>? progress = null,
         bool skipEmbedding = false,
         CancellationToken ct = default)
@@ -76,7 +80,7 @@ public sealed class RagInterop : IAsyncDisposable
         var m = await GetModuleAsync();
         var workerUrl = _nav.BaseUri.TrimEnd('/') + "/js/rag-worker.js";
         await m.InvokeVoidAsync("createRagWorker", ct, workerUrl);
-        await m.InvokeAsync<object>("initRag", ct, dbBytes, embeddingModelId, _dotnetRef, skipEmbedding);
+        await m.InvokeAsync<object>("initRag", ct, dbBytes, embeddingModelId, embeddingDtype, _dotnetRef, skipEmbedding);
         _initialised = true;
     }
 
@@ -163,7 +167,8 @@ public sealed class RagInterop : IAsyncDisposable
                 Text:     row.TryGetProperty("text",     out var x) ? x.GetString() ?? "" : "",
                 Distance: row.TryGetProperty("distance", out var s) && s.ValueKind == JsonValueKind.Number
                               ? s.GetDouble() : 0.0,
-                ChunkId:  row.TryGetProperty("cid",      out var i) && i.TryGetInt64(out var id) ? id : 0));
+                ChunkId:     row.TryGetProperty("cid",         out var i) && i.TryGetInt64(out var id) ? id : 0,
+                ContextText: row.TryGetProperty("contextText", out var cx) ? cx.GetString() ?? "" : ""));
         return list;
     }
 

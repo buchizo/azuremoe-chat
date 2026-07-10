@@ -83,7 +83,8 @@ public sealed class GraphBuilder : IDisposable
             var date = post?.Date ?? "";
             var (cy, cm) = GraphSchema.ParseYearMonth(date);
             Exec($"CREATE (:Chunk {{id: {c.Id}, postId: {c.PostId}, ordinal: {c.Ordinal}, " +
-                 $"text: '{Esc(c.Text)}', date: '{Esc(date)}', title: '{Esc(post?.Title ?? "")}', " +
+                 $"text: '{Esc(c.Text)}', contextText: '{Esc(c.ContextText)}', " +
+                 $"date: '{Esc(date)}', title: '{Esc(post?.Title ?? "")}', " +
                  $"year: {cy}, month: {cm}, " +
                  $"sectionTitle: '{Esc(c.SectionTitle)}', serviceName: '{Esc(c.ServiceName)}', chunkType: '{Esc(c.ChunkType)}', " +
                  $"emb: {CypherFloatArray(emb)}}})");
@@ -118,16 +119,23 @@ public sealed class GraphBuilder : IDisposable
         // --- Azure services -------------------------------------------------
         // Update posts: service names come from H2 headings (chunk.ServiceName).
         // Article posts: service names come from LLM extraction.
-        var allServices  = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var postServices = new Dictionary<long, HashSet<string>>();
+        // Names are normalised (NFKC + alias map) so both sources land on the
+        // same AzureService node.
+        var allServices   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var postServices  = new Dictionary<long, HashSet<string>>();
+        var chunkServices = new Dictionary<long, HashSet<string>>();
 
-        void AddService(long postId, string svc)
+        void AddService(long postId, long chunkId, string svc)
         {
-            if (string.IsNullOrWhiteSpace(svc)) return;
+            svc = ServiceNames.Normalize(svc);
+            if (svc.Length == 0) return;
             allServices.Add(svc);
             if (!postServices.TryGetValue(postId, out var set))
                 postServices[postId] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             set.Add(svc);
+            if (!chunkServices.TryGetValue(chunkId, out var cset))
+                chunkServices[chunkId] = cset = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            cset.Add(svc);
         }
 
         foreach (var chunk in chunks)
@@ -135,13 +143,13 @@ public sealed class GraphBuilder : IDisposable
             if (!string.IsNullOrEmpty(chunk.ServiceName))
             {
                 // Update post: structural service name from H2
-                AddService(chunk.PostId, chunk.ServiceName);
+                AddService(chunk.PostId, chunk.Id, chunk.ServiceName);
             }
             else if (extractions.TryGetValue(chunk.Id, out var ex))
             {
                 // Article post: LLM-extracted service names
                 foreach (var svc in ex.AzureServices ?? [])
-                    AddService(chunk.PostId, svc);
+                    AddService(chunk.PostId, chunk.Id, svc);
             }
         }
 
@@ -159,6 +167,14 @@ public sealed class GraphBuilder : IDisposable
                 foreach (var svc in services)
                     Exec($"MATCH (p:Post {{id: {postId}}}), (s:AzureService {{name: '{Esc(svc)}'}}) " +
                          $"CREATE (p)-[:COVERS_SERVICE]->(s)");
+            Exec("COMMIT");
+
+            log("ABOUT_SERVICE エッジ挿入...");
+            Exec("BEGIN TRANSACTION");
+            foreach (var (chunkId, services) in chunkServices)
+                foreach (var svc in services)
+                    Exec($"MATCH (c:Chunk {{id: {chunkId}}}), (s:AzureService {{name: '{Esc(svc)}'}}) " +
+                         $"CREATE (c)-[:ABOUT_SERVICE]->(s)");
             Exec("COMMIT");
         }
 

@@ -292,11 +292,14 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
           // model degenerates into repeated words / runaway bullet lists; mild
           // sampling + a repetition penalty keeps output coherent and natural.
           do_sample: true,
-          temperature: 0.4,
+          temperature: 0.3,
           top_p: 0.9,
           top_k: 40,
-          repetition_penalty: 1.2,
-          no_repeat_ngram_size: 3,
+          // Mild penalty only: 1.2 over-penalises repeated Japanese particles
+          // and the "[1]"-style citation tokens; runaway output is capped by
+          // max_new_tokens instead. ngram 4 lets a product name appear twice.
+          repetition_penalty: 1.05,
+          no_repeat_ngram_size: 4,
           streamer,
           return_full_text: false,
         });

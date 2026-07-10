@@ -12,12 +12,15 @@ namespace AzureMoe.Chat.Core;
 /// </summary>
 public static partial class Chunking
 {
-    /// <summary>Target chunk size in characters. Japanese is dense, so this is
-    /// smaller than a typical English token-based window.</summary>
-    public const int TargetChars = 800;
+    /// <summary>Target chunk size in characters. Japanese runs ~0.6-0.9 tokens/char
+    /// under XLM-R SentencePiece, and the embed input also carries a title/service
+    /// prefix — 600 chars keeps everything inside E5's 512-token window. Generation
+    /// context no longer depends on chunk size (see ContextEnricher), so smaller
+    /// retrieval keys are strictly better.</summary>
+    public const int TargetChars = 600;
 
     /// <summary>Hard ceiling — a single paragraph longer than this is force-split.</summary>
-    public const int MaxChars = 1200;
+    public const int MaxChars = 900;
 
     [GeneratedRegex(@"<(script|style)[^>]*>.*?</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase)]
     private static partial Regex ScriptStyle();

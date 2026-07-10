@@ -37,9 +37,20 @@ function idList(ids) {
 
 // ── Constants (mirrors RetrievalEngine.cs) ─────────────────────────────────
 const AUTHORITY_K = 100;
-const GRAPH_BONUS = 0.05;
+const GRAPH_BONUS = 0.08;
 const DATE_BOOST  = 0.05;
-const SHARED_CAP  = 5;
+// shared = how many of the 3 expansion routes (tag / entity / service) found
+// the chunk, so 3 is the natural cap.
+const SHARED_CAP  = 3;
+// Diversity: at most this many chunks of the same post in the final selection,
+// so one dominant article can't collapse every reference slot into a single
+// merged reference downstream (GroupByPost merges same-URL chunks).
+const MAX_PER_URL = 2;
+
+// Schema-v2 feature flags, probed at init so this worker still works against a
+// v1 database (no contextText column / ABOUT_SERVICE table).
+let hasContextText  = false;
+let hasAboutService = false;
 
 // ── Synchronous DB query helpers ───────────────────────────────────────────
 
@@ -79,13 +90,19 @@ function runQueryWithVec(cypher, vec) {
 
 function readChunk(row) {
   return {
-    title:    row.title    ?? "",
-    date:     row.date     ?? "",
-    url:      row.url      ?? "",
-    text:     row.text     ?? "",
-    distance: typeof row.distance === "number" ? row.distance : 0.0,
-    cid:      typeof row.cid      === "number" ? row.cid      : 0,
+    title:       row.title       ?? "",
+    date:        row.date        ?? "",
+    url:         row.url         ?? "",
+    text:        row.text        ?? "",
+    contextText: row.contextText ?? "",
+    distance:    typeof row.distance === "number" ? row.distance : 0.0,
+    cid:         typeof row.cid      === "number" ? row.cid      : 0,
   };
+}
+
+// "c.contextText AS contextText" fragment, or a literal '' on a v1 database.
+function ctxCol(alias) {
+  return hasContextText ? `${alias}.contextText AS contextText` : `'' AS contextText`;
 }
 
 // ── Keyword search (no embedding required) ─────────────────────────────────
@@ -114,7 +131,7 @@ function keywordSearch(keywords, topK) {
       addRows(runQuery(
         `MATCH (p:Post)-[:HAS_CHUNK]->(c:Chunk)
 WHERE p.title CONTAINS '${escaped}'
-RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, 0.0 AS distance
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, ${ctxCol("c")}, c.id AS cid, 0.0 AS distance
 ORDER BY p.date DESC, c.ordinal ASC
 LIMIT ${topK}`));
     } catch (e) { console.warn("[rag-worker] keyword title search error:", e?.message); }
@@ -124,7 +141,7 @@ LIMIT ${topK}`));
       addRows(runQuery(
         `MATCH (t:Tag)<-[:TAGGED]-(p:Post)-[:HAS_CHUNK]->(c:Chunk)
 WHERE t.name CONTAINS '${escaped}'
-RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, 0.0 AS distance
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, ${ctxCol("c")}, c.id AS cid, 0.0 AS distance
 ORDER BY p.date DESC, c.ordinal ASC
 LIMIT ${topK}`));
     } catch (e) { console.warn("[rag-worker] keyword tag search error:", e?.message); }
@@ -140,7 +157,7 @@ function vectorSearch(vec, topK) {
     `CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_emb_idx', $qv, ${topK})
 YIELD node AS c, distance
 MATCH (p:Post)-[:HAS_CHUNK]->(c)
-RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, distance
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, ${ctxCol("c")}, c.id AS cid, distance
 ORDER BY distance`,
     vec);
   return rows.map(readChunk);
@@ -152,7 +169,7 @@ function vectorSearchInDateRange(vec, fromIso, toIso, topK, overFetch) {
 YIELD node AS c, distance
 MATCH (p:Post)-[:HAS_CHUNK]->(c)
 WHERE p.date >= '${esc(fromIso)}' AND p.date < '${esc(toIso)}'
-RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, distance
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, ${ctxCol("c")}, c.id AS cid, distance
 ORDER BY distance
 LIMIT ${topK}`,
     vec);
@@ -163,7 +180,7 @@ function chunksByDateRange(fromIso, toIso, topK) {
   const rows = runQuery(
     `MATCH (p:Post)-[:HAS_CHUNK]->(c:Chunk)
 WHERE p.date >= '${esc(fromIso)}' AND p.date < '${esc(toIso)}'
-RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, c.id AS cid, 0.0 AS distance
+RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, ${ctxCol("c")}, c.id AS cid, 0.0 AS distance
 ORDER BY p.date DESC, c.ordinal ASC
 LIMIT ${topK}`);
   return rows.map(readChunk);
@@ -178,16 +195,21 @@ function expandByGraph(seedIds, limit, includeRelated) {
   // traversal early. A single UNION ALL + ORDER BY shared + outer LIMIT forces
   // Kuzu to exhaust all branches before applying the limit (no early exit), which
   // caused 200+ second runtimes. count(DISTINCT) grouping on the text column was
-  // also extremely expensive; shared is set to 1 uniformly (a tiny scoring delta).
-  const seen = new Set(seedIds);  // pre-seed with vector-search results to avoid duplicates
-  const results = [];
+  // also extremely expensive; instead `shared` counts how many of the 3 routes
+  // (tag / entity / service) independently surfaced the chunk — cheap in JS and
+  // a meaningful consensus signal for ranking.
+  const seedSet = new Set(seedIds);
+  const found   = new Map();  // cid → { chunk, shared }
 
   function addRows(rows) {
+    const inThisRoute = new Set();  // count each route at most once per chunk
     for (const row of rows) {
       const c = readChunk(row);
-      if (!c.cid || seen.has(c.cid)) continue;
-      seen.add(c.cid);
-      results.push({ chunk: c, shared: 1 });
+      if (!c.cid || seedSet.has(c.cid) || inThisRoute.has(c.cid)) continue;
+      inThisRoute.add(c.cid);
+      const entry = found.get(c.cid);
+      if (entry) entry.shared++;
+      else found.set(c.cid, { chunk: c, shared: 1 });
     }
   }
 
@@ -197,7 +219,7 @@ function expandByGraph(seedIds, limit, includeRelated) {
     addRows(runQuery(
       `MATCH (sp:Post)-[:HAS_CHUNK]->(seed:Chunk) WHERE seed.id IN ${ids}
 MATCH (sp)-[:TAGGED]->(t:Tag)<-[:TAGGED]-(p2:Post)-[:HAS_CHUNK]->(c2:Chunk)
-RETURN p2.title AS title, p2.date AS date, p2.url AS url, c2.text AS text, c2.id AS cid
+RETURN p2.title AS title, p2.date AS date, p2.url AS url, c2.text AS text, ${ctxCol("c2")}, c2.id AS cid
 LIMIT ${cap}`));
   } catch (e) { console.warn("[rag-worker] tag expand error:", e?.message); }
 
@@ -206,19 +228,29 @@ LIMIT ${cap}`));
       `MATCH (seed:Chunk)-[:MENTIONS]->(e:Entity) WHERE seed.id IN ${ids}
 MATCH (e)${hop}<-[:MENTIONS]-(c2:Chunk)
 MATCH (p:Post)-[:HAS_CHUNK]->(c2)
-RETURN p.title AS title, p.date AS date, p.url AS url, c2.text AS text, c2.id AS cid
+RETURN p.title AS title, p.date AS date, p.url AS url, c2.text AS text, ${ctxCol("c2")}, c2.id AS cid
 LIMIT ${cap}`));
   } catch (e) { console.warn("[rag-worker] entity expand error:", e?.message); }
 
   try {
-    addRows(runQuery(
-      `MATCH (sp:Post)-[:HAS_CHUNK]->(seed:Chunk) WHERE seed.id IN ${ids}
-MATCH (sp)-[:COVERS_SERVICE]->(s:AzureService)<-[:COVERS_SERVICE]-(p2:Post)-[:HAS_CHUNK]->(c2:Chunk)
-RETURN p2.title AS title, p2.date AS date, p2.url AS url, c2.text AS text, c2.id AS cid
+    if (hasAboutService) {
+      // v2: chunk-level service edge — returns "other updates about the same
+      // service" instead of arbitrary chunks from 30-service monthly digests.
+      addRows(runQuery(
+        `MATCH (seed:Chunk)-[:ABOUT_SERVICE]->(s:AzureService)<-[:ABOUT_SERVICE]-(c2:Chunk) WHERE seed.id IN ${ids}
+MATCH (p:Post)-[:HAS_CHUNK]->(c2)
+RETURN p.title AS title, p.date AS date, p.url AS url, c2.text AS text, ${ctxCol("c2")}, c2.id AS cid
 LIMIT ${cap}`));
+    } else {
+      addRows(runQuery(
+        `MATCH (sp:Post)-[:HAS_CHUNK]->(seed:Chunk) WHERE seed.id IN ${ids}
+MATCH (sp)-[:COVERS_SERVICE]->(s:AzureService)<-[:COVERS_SERVICE]-(p2:Post)-[:HAS_CHUNK]->(c2:Chunk)
+RETURN p2.title AS title, p2.date AS date, p2.url AS url, c2.text AS text, ${ctxCol("c2")}, c2.id AS cid
+LIMIT ${cap}`));
+    }
   } catch (e) { console.warn("[rag-worker] service expand error:", e?.message); }
 
-  return results;
+  return [...found.values()];
 }
 
 // ── Embedding ──────────────────────────────────────────────────────────────
@@ -226,7 +258,7 @@ LIMIT ${cap}`));
 // id is the pending message id so progress events can be correlated on the main thread.
 // dotnetRef cannot be passed across postMessage (not structured-cloneable), so
 // the worker posts plain progress messages and rag-interop.js calls dotnetRef there.
-async function loadEmbeddingPipeline(modelId, id) {
+async function loadEmbeddingPipeline(modelId, dtype, id) {
   env.allowRemoteModels = true;
   const progressCb = (info) => {
     if (info?.status === "progress") {
@@ -241,12 +273,12 @@ async function loadEmbeddingPipeline(modelId, id) {
   // multilingual-e5-small on WASM is fast enough (~50-150 ms/call) so we skip WebGPU
   // here; WebGPU is still used for the LLM in llm-worker.js where the gain is larger.
   const p = await pipeline("feature-extraction", modelId, {
-    dtype: "q8",
+    dtype: dtype ?? "q8",
     device: "wasm",
     progress_callback: progressCb,
   });
   _embeddingDevice = "wasm";
-  console.log("[rag-worker] embedding device: wasm");
+  console.log(`[rag-worker] embedding device: wasm  dtype: ${dtype ?? "q8"}`);
 
   // Warmup: trigger ONNX WASM kernel JIT compilation now so the first real
   // query doesn't pay the ~1.5 s compilation cost.
@@ -325,6 +357,9 @@ function rankAndSelect(candidates, authority, origQ, opt) {
 
   // rel: cid → cosine-similarity to original question (1 − distance)
   const rel = new Map(authority.map(a => [a.cid, 1.0 - a.distance]));
+  const minAuthorityRel = authority.length
+    ? Math.min(...authority.map(a => 1.0 - a.distance))
+    : 0.0;
 
   // Pool = recall candidates ∪ authority (ensures the question's own top hits are
   // always considered even when the search query was a rewrite).
@@ -340,6 +375,10 @@ function rankAndSelect(candidates, authority, origQ, opt) {
     let r;
     if (rel.has(c.cid)) {
       r = rel.get(c.cid);
+    } else if (shared >= 2) {
+      // Strong graph consensus (found by 2+ independent routes) survives the
+      // authority cutoff, slotted just below the weakest authority hit.
+      r = Math.max(0, minAuthorityRel - 0.02);
     } else {
       if (!hard) continue;  // non-dated: outside relevance pool → drop (precision cutoff)
       r = 0.0;              // dated: keep for coverage at lowest priority
@@ -354,10 +393,27 @@ function rankAndSelect(candidates, authority, origQ, opt) {
   if (scored.length === 0)
     scored = candidates.slice(0, opt.ragTopK).map(({ chunk: c }) => ({ chunk: c, rel: 0.5, score: 0.5 }));
 
-  return scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, opt.ragTopK)
-    .map(s => ({ ...s.chunk, distance: Math.max(0, Math.min(1, 1.0 - s.rel)) }));
+  scored.sort((a, b) => b.score - a.score);
+
+  // Diversity pass: cap chunks per post URL, then backfill from the skipped
+  // ones if the cap left slots empty.
+  const perUrl  = new Map();
+  const picked  = [];
+  const skipped = [];
+  for (const s of scored) {
+    if (picked.length >= opt.ragTopK) break;
+    const key = s.chunk.url || `cid:${s.chunk.cid}`;
+    const n = perUrl.get(key) ?? 0;
+    if (n >= MAX_PER_URL) { skipped.push(s); continue; }
+    perUrl.set(key, n + 1);
+    picked.push(s);
+  }
+  for (const s of skipped) {
+    if (picked.length >= opt.ragTopK) break;
+    picked.push(s);
+  }
+
+  return picked.map(s => ({ ...s.chunk, distance: Math.max(0, Math.min(1, 1.0 - s.rel)) }));
 }
 
 // ── Retrieve: Fast / Normal (one recall pass) ──────────────────────────────
@@ -435,8 +491,22 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
 
       self.postMessage({ id, type: "progress", payload: { stage: "db", file: "chat.db", pct: 100 } });
 
+      // Probe schema v2 features so a v1 database (no contextText column /
+      // ABOUT_SERVICE table) still works — queries fall back to v1 shape.
+      try {
+        const r = conn.query("MATCH (c:Chunk) RETURN c.contextText AS x LIMIT 1");
+        hasContextText = r.isSuccess();
+        r.close();
+      } catch { hasContextText = false; }
+      try {
+        const r = conn.query("MATCH ()-[e:ABOUT_SERVICE]->() RETURN e LIMIT 1");
+        hasAboutService = r.isSuccess();
+        r.close();
+      } catch { hasAboutService = false; }
+      console.log(`[rag-worker] schema features: contextText=${hasContextText} aboutService=${hasAboutService}`);
+
       if (!payload.skipEmbedding) {
-        extractor = await loadEmbeddingPipeline(payload.embeddingModelId, id);
+        extractor = await loadEmbeddingPipeline(payload.embeddingModelId, payload.embeddingDtype, id);
       } else {
         _embeddingDevice = "none";
       }

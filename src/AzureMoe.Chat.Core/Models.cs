@@ -21,6 +21,10 @@ public sealed record Chunk
     public string ServiceName { get; init; } = "";
     /// <summary>"update_item" for structured Update-post bullets; "prose" for all other chunks.</summary>
     public string ChunkType { get; init; } = "prose";
+    /// <summary>Small-to-big: neighbouring text (sibling bullets / adjacent chunks)
+    /// served to the LLM as generation context. Empty = fall back to Text.
+    /// The embedding is always over Text — retrieval keys stay fine-grained.</summary>
+    public string ContextText { get; set; } = "";
     public float[]? Embedding { get; set; }
 }
 

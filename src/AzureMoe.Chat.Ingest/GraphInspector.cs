@@ -87,9 +87,12 @@ public sealed class GraphInspector : IDisposable
     /// run the vector index, printing the top-K chunks. Verifies that a given
     /// question retrieves the articles you'd expect.
     /// </summary>
-    public void SampleVectorSearch(string queryText, string modelDir, int topK)
+    public void SampleVectorSearch(string queryText, string modelDir, int topK, string dtype)
     {
-        using var embedder = new E5Embedder(modelDir);
+        // dtype must match the one the DB was built with — a mismatched ONNX
+        // quantisation embeds queries in a subtly different vector space and
+        // makes this diagnostic lie about retrieval quality.
+        using var embedder = new E5Embedder(modelDir, dtype);
         var vec  = embedder.EmbedQuery(queryText);
         var vals = string.Join(",", vec.Select(v => v.ToString("R", CultureInfo.InvariantCulture)));
         var cypher = $"""

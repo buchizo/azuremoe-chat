@@ -120,7 +120,8 @@ public sealed class GraphAppender : IDisposable
         {
             var emb = c.Embedding ?? throw new InvalidOperationException($"Chunk {c.Id} has no embedding.");
             Exec($"CREATE (:Chunk {{id: {c.Id}, postId: {c.PostId}, ordinal: {c.Ordinal}, " +
-                 $"text: '{Esc(c.Text)}', date: '{Esc(post.Date)}', title: '{Esc(post.Title)}', " +
+                 $"text: '{Esc(c.Text)}', contextText: '{Esc(c.ContextText)}', " +
+                 $"date: '{Esc(post.Date)}', title: '{Esc(post.Title)}', " +
                  $"year: {py}, month: {pm}, " +
                  $"sectionTitle: '{Esc(c.SectionTitle)}', serviceName: '{Esc(c.ServiceName)}', chunkType: '{Esc(c.ChunkType)}', " +
                  $"emb: {CypherFloatArray(emb)}}})");
@@ -159,17 +160,30 @@ public sealed class GraphAppender : IDisposable
         // --- Azure services --------------------------------------------------
         // Update posts: from H2 headings (chunk.ServiceName).
         // Article posts: from LLM extraction.
-        var allServices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Names normalised the same way as the full build (NFKC + alias map).
+        var allServices   = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var chunkServices = new Dictionary<long, HashSet<string>>();
+
+        void AddService(long chunkId, string svc)
+        {
+            svc = ServiceNames.Normalize(svc);
+            if (svc.Length == 0) return;
+            allServices.Add(svc);
+            if (!chunkServices.TryGetValue(chunkId, out var cset))
+                chunkServices[chunkId] = cset = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            cset.Add(svc);
+        }
+
         foreach (var chunk in chunks)
         {
             if (!string.IsNullOrEmpty(chunk.ServiceName))
             {
-                allServices.Add(chunk.ServiceName);
+                AddService(chunk.Id, chunk.ServiceName);
             }
             else if (extractions.TryGetValue(chunk.Id, out var ex))
             {
                 foreach (var svc in ex.AzureServices ?? [])
-                    if (!string.IsNullOrWhiteSpace(svc)) allServices.Add(svc);
+                    AddService(chunk.Id, svc);
             }
         }
 
@@ -192,6 +206,13 @@ public sealed class GraphAppender : IDisposable
             foreach (var svc in allServices)
                 Exec($"MATCH (p:Post {{id: {post.Id}}}), (s:AzureService {{name: '{Esc(svc)}'}}) " +
                      $"CREATE (p)-[:COVERS_SERVICE]->(s)");
+            Exec("COMMIT");
+
+            Exec("BEGIN TRANSACTION");
+            foreach (var (chunkId, services) in chunkServices)
+                foreach (var svc in services)
+                    Exec($"MATCH (c:Chunk {{id: {chunkId}}}), (s:AzureService {{name: '{Esc(svc)}'}}) " +
+                         $"CREATE (c)-[:ABOUT_SERVICE]->(s)");
             Exec("COMMIT");
         }
 

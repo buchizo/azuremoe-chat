@@ -9,10 +9,12 @@ namespace AzureMoe.Chat.Core;
 /// </summary>
 public sealed record Manifest
 {
-    [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = 1;
+    // v2: Chunk.contextText column + ABOUT_SERVICE rel table.
+    [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; init; } = 2;
     [JsonPropertyName("engineVersion")] public required string EngineVersion { get; init; }
     [JsonPropertyName("embeddingModel")] public required string EmbeddingModel { get; init; }
     [JsonPropertyName("embeddingDim")] public required int EmbeddingDim { get; init; }
+    [JsonPropertyName("embeddingDtype")] public string? EmbeddingDtype { get; init; }
 
     /// <summary>Object key of the DB file in the bucket (e.g. "blog-20260613.lbdb").</summary>
     [JsonPropertyName("databaseFile")] public required string DatabaseFile { get; init; }
