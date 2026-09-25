@@ -22,6 +22,14 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
 
     public string? Device      { get; private set; }
     public string? LoadedDtype { get; private set; }
+    /// <summary>WebGPU adapter the browser handed out (vendor / architecture / flags);
+    /// null on WASM. Diagnoses a browser that picks an integrated or fallback GPU.</summary>
+    public string? AdapterInfo { get; private set; }
+    /// <summary>(device/dtype: error) for load strategies that failed before the
+    /// one that loaded — a silent fallback otherwise only shows up as slowness.</summary>
+    public IReadOnlyList<string> SkippedStrategies { get; private set; } = [];
+    /// <summary>Speed of the most recent generation, e.g. "webgpu  初回トークン 820ms / 42.3 tok/s (256 tokens)".</summary>
+    public string? LastStats { get; private set; }
     public bool    IsLoaded => Device is not null;
 
     public JsLlmEngine(IJSRuntime js, NavigationManager nav, AppConfig cfg)
@@ -71,6 +79,9 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         var result = await m.InvokeAsync<JsonElement>("loadLlmModel", ct, modelId, dtype, _loadRef);
         Device      = result.TryGetProperty("device", out var d) ? d.GetString() : "wasm";
         LoadedDtype = result.TryGetProperty("dtype",  out var t) ? t.GetString() : dtype;
+        AdapterInfo = result.TryGetProperty("adapter", out var a) && a.ValueKind == JsonValueKind.String ? a.GetString() : null;
+        SkippedStrategies = result.TryGetProperty("skipped", out var sk) && sk.ValueKind == JsonValueKind.Array
+            ? sk.EnumerateArray().Select(x => x.GetString() ?? "").ToList() : [];
     }
 
     public async ValueTask ChatAsync(
@@ -107,6 +118,8 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
             // Returns { fullText } after all tokens have been streamed.
             var result = await m2.InvokeAsync<JsonElement>(
                 "chat", ct, messagesJson, maxNewTokens, _chatRef);
+            LastStats = result.TryGetProperty("stats", out var st) && st.ValueKind == JsonValueKind.Object
+                ? FormatStats(st) : null;
             return result.TryGetProperty("fullText", out var ft) ? ft.GetString() ?? "" : "";
         }
         finally
@@ -114,6 +127,12 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
             _chatRef?.Dispose();
             _chatRef = null;
         }
+    }
+
+    private static string FormatStats(JsonElement st)
+    {
+        string Get(string name) => st.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null ? v.ToString() : "?";
+        return $"{Get("device")}  初回トークン {Get("ttftMs")}ms / {Get("tokPerSec")} tok/s ({Get("tokens")} tokens)";
     }
 
     /// <summary>Tell the JS worker to abort the in-progress generation.</summary>
@@ -137,6 +156,9 @@ public sealed class JsLlmEngine : ILlmEngine, IAsyncDisposable
         _chatRef = null;
         Device      = null;   // IsLoaded → false
         LoadedDtype = null;
+        AdapterInfo = null;
+        SkippedStrategies = [];
+        LastStats   = null;
     }
 
     [JSInvokable]

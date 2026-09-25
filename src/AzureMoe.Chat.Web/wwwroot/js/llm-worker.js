@@ -60,12 +60,24 @@ let loadedDtype   = "q4";
 let interrupted = false;
 const INTERRUPT_SENTINEL = "__INTERRUPTED__";
 
+// Human-readable description of the WebGPU adapter the browser hands out, so a
+// browser that silently picks the integrated GPU or a software fallback
+// adapter shows up in the startup log instead of just being slow.
+let adapterInfo = null;
+
 async function detectDevice() {
   if (!ENABLE_WEBGPU) return "wasm";
   if (typeof navigator === "undefined" || !navigator.gpu) return "wasm";
   try {
-    const adapter = await navigator.gpu.requestAdapter();
-    return adapter ? "webgpu" : "wasm";
+    // Same hint ORT is configured with above; the browser may still ignore it.
+    const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+    if (!adapter) return "wasm";
+    const i = adapter.info ?? {};
+    const fallback = i.isFallbackAdapter ?? adapter.isFallbackAdapter ?? false;
+    adapterInfo = [i.vendor, i.architecture, i.description || i.device].filter(Boolean).join(" / ") || "(不明)";
+    if (fallback) adapterInfo += " [fallback adapter]";
+    adapterInfo += adapter.features?.has("shader-f16") ? " [shader-f16]" : " [no shader-f16]";
+    return "webgpu";
   } catch {
     return "wasm";
   }
@@ -194,6 +206,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       if (dtype !== "fp16") strategies.push({ device: "wasm", dtype: "fp16" });
 
       let lastError = null;
+      const skipped = [];   // strategies that failed before the one that loaded
       for (let i = 0; i < strategies.length; i++) {
         const s = strategies[i];
         try {
@@ -225,6 +238,7 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         } catch (e) {
           lastError = e;
           if (isOperatorUnsupported(e) || isGpuDeviceLost(e)) {
+            skipped.push(`${s.device}/${s.dtype}: ${String(e?.message ?? e).slice(0, 120)}`);
             if (i + 1 < strategies.length) {
               const next = strategies[i + 1];
               self.postMessage({ id, type: "progress", payload: {
@@ -238,13 +252,18 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       }
       if (lastError) throw lastError;
 
-      self.postMessage({ id, type: "loaded", payload: { device: activeDevice, dtype: loadedDtype } });
+      self.postMessage({ id, type: "loaded", payload: {
+        device: activeDevice, dtype: loadedDtype,
+        adapter: activeDevice === "webgpu" ? adapterInfo : null,
+        skipped,
+      }});
 
     // ── generate ──────────────────────────────────────────────────────────
     } else if (type === "generate") {
       if (!useBuiltinAI && !pipe) throw new Error("Model not loaded — call 'load' first");
       const { messages, maxNewTokens = 1024 } = payload;
       let fullText = "";
+      let stats = null;
       interrupted = false;   // fresh run
 
       if (useBuiltinAI) {
@@ -275,10 +294,13 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
         }
 
       } else {
+        const t0 = performance.now();
+        let firstTokenAt = null;
         const streamer = new TextStreamer(pipe.tokenizer, {
           skip_prompt: true,
           skip_special_tokens: true,
           callback_function: (chunk) => {
+            firstTokenAt ??= performance.now();
             fullText += chunk;
             self.postMessage({ id, type: "token", payload: { token: chunk } });
             // Throwing here aborts the in-progress generate() — this is how the
@@ -304,9 +326,23 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
           streamer,
           return_full_text: false,
         });
+
+        // Prefill (time to first token) and decode speed, to compare browsers /
+        // devices. Tokens are re-counted from the text: the streamer's callback
+        // fires per decoded word, not per token.
+        const end = performance.now();
+        let tokens = 0;
+        try { tokens = pipe.tokenizer.encode(fullText, { add_special_tokens: false }).length; } catch { }
+        const decodeMs = firstTokenAt ? end - firstTokenAt : 0;
+        stats = {
+          device: activeDevice,
+          ttftMs: Math.round((firstTokenAt ?? end) - t0),
+          tokens,
+          tokPerSec: decodeMs > 0 && tokens > 1 ? +((tokens - 1) / (decodeMs / 1000)).toFixed(1) : null,
+        };
       }
 
-      self.postMessage({ id, type: "done", payload: { fullText } });
+      self.postMessage({ id, type: "done", payload: { fullText, stats } });
 
     } else {
       throw new Error(`Unknown message type: ${type}`);

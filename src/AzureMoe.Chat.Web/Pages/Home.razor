@@ -24,7 +24,8 @@
       </pre>
         <div class="splash-desc">ブラウザ内でGraphDBとLLMを起動し、<a class="url" href="https://blog.azure.moe" target="_blank">blog.azure.moe</a> の内容を検索できる実験サイトです。<br />
         WebGPUが利用可能な場合、LLMのロードに2 GB程度のGPUのVRAMとメインメモリが必要です。<br />
-        スマートフォンではメモリ制約により DB・AI モデルの読み込みをスキップします。
+        スマートフォンではメモリ制約により DB・AI モデルの読み込みをスキップします。<br />
+        Microsoft Edge で「Web 上のセキュリティを強化する」が有効な場合、回答の生成が大幅に遅くなることがあります。その場合は設定の例外にこのサイトを追加してください。
         </div>
         <button class="splash-accept" @onclick="AcceptAsync">Accept</button>
         <footer class="app-footer splash-footer">
@@ -231,6 +232,10 @@ else
                     Status($"LLM: {Cfg.LlmModelId}  100%");
                 }
                 Print($"LLM 準備完了  [{LlmEngine.Device}]", "ok");
+                if (LlmEngine.AdapterInfo is { } adapter)
+                    Print($"GPU: {EscapeHtml(adapter)}", "info");
+                foreach (var skipped in LlmEngine.SkippedStrategies)
+                    Print($"⚠ 読み込みフォールバック: {EscapeHtml(skipped)}", "warn");
                 if (Router.IsHttpMode)
                     Print($"HTTP LLM を使用します: {EscapeHtml(Router.HttpEndpoint ?? "")}  (/llm で変更)", "info");
             }
@@ -351,6 +356,8 @@ else
                     ct: _cts.Token);
 
                 _thinking = null;
+                if (_debugMode && !Router.IsHttpMode && LlmEngine.LastStats is { } speed)
+                    Print($"[debug] 生成速度 (最後の生成): {EscapeHtml(speed)}", "debug");
                 StateHasChanged();
                 PrintBlank();
                 PrintSources(sources);
@@ -422,6 +429,10 @@ else
                         ? $"{ld} ← {Cfg.LlmDtype} からフォールバック"
                         : LlmEngine.LoadedDtype ?? Cfg.LlmDtype;
                     Print($"LLM     : {Cfg.LlmModelId} ({dtypeInfo})  {llmStatus}", "info");
+                    if (LlmEngine.AdapterInfo is { } adapter)
+                        Print($"GPU     : {EscapeHtml(adapter)}", "info");
+                    if (LlmEngine.LastStats is { } speed)
+                        Print($"生成速度: {EscapeHtml(speed)}  (直近の生成)", "info");
                 }
                 Print($"埋め込み: {_embedding?.ModelId ?? Cfg.EmbeddingModelId} ({_embedding?.Dtype ?? Cfg.EmbeddingDtype})", "info");
                 Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
