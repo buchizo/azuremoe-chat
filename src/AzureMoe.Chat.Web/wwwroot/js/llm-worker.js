@@ -4,12 +4,13 @@
 //           3) transformers.js on WASM CPU
 // transformers.js v4+ required — Qwen3.5 (qwen3_5) support was added in v4.
 // Pinned to an exact version (not the floating @4 range) so esm.sh always
-// resolves the same build — 4.2.0 is the current latest. NOTE: the WebGPU
-// "Invalid Buffer / mapAsync" crash on repeated generation lives in v4's
-// native (C++) WebGPU runtime and is not fixed in any 4.x release, so a
-// version bump alone will not resolve it; we mitigate via the WASM fallback
-// and by keeping GPU buffers small (trimmed history + bounded max tokens).
-import { env, pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4.2.0";
+// resolves the same build; rag-worker.js pins the same version. 4.3.0 ships a
+// newer ONNX Runtime. NOTE: the WebGPU "Invalid Buffer / mapAsync" crash on
+// repeated generation was observed on 4.2.0's native (C++) WebGPU runtime; the
+// WASM fallback and small GPU buffers (trimmed history + bounded max tokens)
+// stay in place as mitigation. Revert to 4.2.0 if the LFM2.5 chat template or
+// WebGPU path regresses.
+import { env, pipeline, TextStreamer } from "https://esm.sh/@huggingface/transformers@4.3.0";
 
 // coi-serviceworker.js uses COEP "credentialless" (not "require-corp"), so
 // cross-origin CORS fetches to huggingface.co are allowed without a proxy.

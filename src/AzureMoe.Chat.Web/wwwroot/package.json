@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@ladybugdb/wasm-core": "^0.17.1"
+    "@ladybugdb/wasm-core": "0.19.1"
   }
 }

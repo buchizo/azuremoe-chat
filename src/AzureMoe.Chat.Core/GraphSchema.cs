@@ -10,7 +10,7 @@ public static class GraphSchema
 {
     /// <summary>Ladybug engine version the DB file is built with. Must match the
     /// browser's @ladybugdb/wasm-core version (storage format compatibility).</summary>
-    public const string EngineVersion = "0.17.0";
+    public const string EngineVersion = "0.19.1";
 
     /// <summary>Embedding dimension of multilingual-e5-small.</summary>
     public const int EmbeddingDim = 384;

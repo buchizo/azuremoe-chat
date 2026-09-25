@@ -96,7 +96,7 @@ public static class UpdatePostParser
             {
                 case HtmlNodeType.Text:
                     var t = HtmlEntity.DeEntitize(
-                        Regex.Replace(child.InnerText, @"\s+", " ")).Trim();
+                        Regex.Replace(child.InnerText ?? "", @"\s+", " ")).Trim();
                     if (!string.IsNullOrWhiteSpace(t))
                         sb.Append(t);
                     break;

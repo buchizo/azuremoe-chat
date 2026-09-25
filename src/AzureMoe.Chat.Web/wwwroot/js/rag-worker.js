@@ -4,7 +4,10 @@
 // Communicates with the main thread via rag-interop.js using a typed message
 // protocol: { id, type, payload } / { id, type: "done"|"progress"|"error", payload }.
 import lbug from "../lib/ladybug/index.js";
-import { pipeline, env } from "https://esm.sh/@huggingface/transformers@4";
+// Pinned to the same exact version as llm-worker.js: a floating range could
+// resolve to a different build than the one the DB's passage vectors were
+// verified against, and two versions would also double the download.
+import { pipeline, env } from "https://esm.sh/@huggingface/transformers@4.3.0";
 
 // coi-serviceworker.js uses COEP "credentialless" (not "require-corp"), so
 // cross-origin CORS fetches to huggingface.co are allowed without a proxy.
