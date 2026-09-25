@@ -21,6 +21,7 @@ env.backends.onnx.wasm.numThreads = 1;
 let conn = null;
 let db   = null;
 let extractor = null;
+let _queryPrefix = "";
 let _embeddingDevice = "unknown";
 let _debugLog = null; // string[] when debug is enabled, null otherwise
 
@@ -261,7 +262,7 @@ LIMIT ${cap}`));
 // id is the pending message id so progress events can be correlated on the main thread.
 // dotnetRef cannot be passed across postMessage (not structured-cloneable), so
 // the worker posts plain progress messages and rag-interop.js calls dotnetRef there.
-async function loadEmbeddingPipeline(modelId, dtype, id) {
+async function loadEmbeddingPipeline(modelId, dtype, revision, id) {
   env.allowRemoteModels = true;
   const progressCb = (info) => {
     if (info?.status === "progress") {
@@ -273,27 +274,38 @@ async function loadEmbeddingPipeline(modelId, dtype, id) {
   // WebGPU inference for the embedding model deadlocks on HTTPS under COOP/COEP
   // (D3D12 GPU fence never signals back to the JS thread). enableGraphCapture:false
   // prevents the issue at session-create time but not during readback after inference.
-  // multilingual-e5-small on WASM is fast enough (~50-150 ms/call) so we skip WebGPU
+  // A small embedding model on WASM is fast enough (~50-150 ms/call) so we skip WebGPU
   // here; WebGPU is still used for the LLM in llm-worker.js where the gain is larger.
+  // revision pins the exact commit the DB's passages were embedded with (manifest).
   const p = await pipeline("feature-extraction", modelId, {
     dtype: dtype ?? "q8",
+    revision: revision ?? "main",
     device: "wasm",
     progress_callback: progressCb,
   });
   _embeddingDevice = "wasm";
-  console.log(`[rag-worker] embedding device: wasm  dtype: ${dtype ?? "q8"}`);
+  console.log(`[rag-worker] embedding: ${modelId}@${revision ?? "main"}  device: wasm  dtype: ${dtype ?? "q8"}`);
 
   // Warmup: trigger ONNX WASM kernel JIT compilation now so the first real
   // query doesn't pay the ~1.5 s compilation cost.
-  try { await p("query: warmup", { pooling: "mean", normalize: true }); } catch {}
+  try { await p(_queryPrefix + "warmup", { pooling: "mean", normalize: true }); } catch {}
 
   return p;
 }
 
+// Mirrors EmbeddingProfile.NormalizeQuery (C#). transformers.js' Unigram
+// tokenizer has no byte_fallback, so a newline would become <unk> here while
+// the reference tokenizer (used at ingest) emits <0x0A>; collapsing whitespace
+// keeps both sides tokenizing queries identically.
+function normalizeQuery(text) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 async function embed(text) {
   if (!extractor) throw new Error("Embedding model not loaded");
-  if (_debugLog !== null) _debugLog.push(`[debug] [Embedding] "query: ${text}"`);
-  const out = await extractor("query: " + text, { pooling: "mean", normalize: true });
+  const input = _queryPrefix + normalizeQuery(text);
+  if (_debugLog !== null) _debugLog.push(`[debug] [Embedding] "${input}"`);
+  const out = await extractor(input, { pooling: "mean", normalize: true });
   const vec = Array.from(out.data);
   const badIdx = vec.findIndex(v => !Number.isFinite(v));
   if (badIdx !== -1)
@@ -509,7 +521,9 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       console.log(`[rag-worker] schema features: contextText=${hasContextText} aboutService=${hasAboutService}`);
 
       if (!payload.skipEmbedding) {
-        extractor = await loadEmbeddingPipeline(payload.embeddingModelId, payload.embeddingDtype, id);
+        _queryPrefix = payload.embeddingQueryPrefix ?? "";
+        extractor = await loadEmbeddingPipeline(
+          payload.embeddingModelId, payload.embeddingDtype, payload.embeddingRevision, id);
       } else {
         _embeddingDevice = "none";
       }

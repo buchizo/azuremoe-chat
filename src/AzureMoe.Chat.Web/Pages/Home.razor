@@ -94,6 +94,7 @@ else
     private bool   _debugMode = false;
     private bool   _isMobile  = false;
     private string? _thinking = null;   // transient "processing" status during a turn
+    private EmbeddingSpec? _embedding;  // query embedding settings from the DB manifest
     private ElementReference _terminalRef;
     private ElementReference _outputRef;
     private ElementReference _inputRef;
@@ -162,12 +163,10 @@ else
             Print($"DB: {manifest.DatabaseFile}  " +
                   $"投稿 {manifest.PostCount} 件 / チャンク {manifest.ChunkCount} 件", "info");
 
-            // The DB was built with a specific embedding dtype (see manifest);
-            // appsettings.json can drift from that after a rebuild. Using a
-            // mismatched dtype embeds queries in a subtly different vector space
-            // than the passages were built with, so the manifest wins.
-            var embeddingDtype = !string.IsNullOrEmpty(manifest.EmbeddingDtype)
-                ? manifest.EmbeddingDtype : Cfg.EmbeddingDtype;
+            // The DB was built with a specific embedding model/revision/dtype/prefix
+            // (see manifest); appsettings.json can drift from that after a rebuild,
+            // so the manifest wins.
+            var embedding = _embedding = manifest.ToEmbeddingSpec(Cfg);
 
             // ── Step 2: DB download (or cache hit) ──
             Status("GraphDB を読み込み中...");
@@ -197,7 +196,7 @@ else
                 Status("GraphDB を初期化中 (キーワード検索モード)...");
                 var ragProgMobile = new Progress<(string Stage, string File, int Pct)>(t =>
                     Status($"GraphDB: {t.File} {t.Pct}%"));
-                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, embeddingDtype, ragProgMobile,
+                await RagInterop.InitAsync(dbBytes, embedding, ragProgMobile,
                     skipEmbedding: true, _cts.Token);
                 Print("GraphDB 準備完了（キーワード検索モード）", "ok");
                 if (Router.IsHttpMode)
@@ -213,7 +212,7 @@ else
                     var label = t.Stage == "db" ? "GraphDB" : "埋め込みモデル";
                     Status($"{label}: {t.File} {t.Pct}%");
                 });
-                await RagInterop.InitAsync(dbBytes, Cfg.EmbeddingModelId, embeddingDtype, ragProg, ct: _cts.Token);
+                await RagInterop.InitAsync(dbBytes, embedding, ragProg, ct: _cts.Token);
                 Print("GraphDB + 埋め込みモデル準備完了", "ok");
 
                 // ── Step 4: LLM preload ──
@@ -424,7 +423,7 @@ else
                         : LlmEngine.LoadedDtype ?? Cfg.LlmDtype;
                     Print($"LLM     : {Cfg.LlmModelId} ({dtypeInfo})  {llmStatus}", "info");
                 }
-                Print($"埋め込み: {Cfg.EmbeddingModelId}", "info");
+                Print($"埋め込み: {_embedding?.ModelId ?? Cfg.EmbeddingModelId} ({_embedding?.Dtype ?? Cfg.EmbeddingDtype})", "info");
                 Print($"探索モード: {ModeLabel(Cfg.RetrievalMode)}", "info");
                 if (_debugMode)    Print("デバッグ  : ON", "info");
                 if (Router.IsHttpMode)
@@ -681,9 +680,9 @@ else
 
         // ── Embedding model ──
         Print("● 埋め込みモデル", "heading");
-        Print($"  {EscapeHtml(Cfg.EmbeddingModelId)} — MIT License", "info");
-        Print("  " + Link("https://huggingface.co/intfloat/multilingual-e5-small",
-                          "intfloat/multilingual-e5-small"), "source");
+        Print("  sirasagi62/ruri-v3-30m-ONNX — Apache-2.0", "info");
+        Print("  " + Link("https://huggingface.co/cl-nagoya/ruri-v3-30m",
+                          "cl-nagoya/ruri-v3-30m (元モデル)"), "source");
         PrintBlank();
 
         // ── JavaScript libraries ──

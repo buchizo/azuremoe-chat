@@ -42,10 +42,12 @@ using (var r = conn.Query("LOAD vector"))
 PrintStats(conn);
 
 // ---------------------------------------------------------------------------
-// E5 埋め込みモデルをロード
+// 埋め込みモデルをロード
 // ---------------------------------------------------------------------------
-Console.WriteLine($"モデル  : {Path.GetFullPath(opt.ModelDir)}");
-using var embedder = new E5Embedder(opt.ModelDir);
+var profile  = EmbeddingProfile.Resolve(opt.EmbeddingModel);
+var modelDir = opt.ModelDir ?? Path.Combine("model", profile.ModelId);
+Console.WriteLine($"モデル  : {profile.ModelId} [{opt.EmbeddingDtype}]  ({Path.GetFullPath(modelDir)})");
+using var embedder = new OnnxEmbedder(modelDir, profile, opt.EmbeddingDtype);
 _ = embedder.EmbedQuery("ウォームアップ");
 Console.WriteLine($"次元    : {embedder.Dimension}");
 Console.WriteLine();

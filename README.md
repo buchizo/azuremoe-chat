@@ -17,9 +17,11 @@ azuremoe-chat/
 ├── docs/
 │   └── architecture.md           設計ドキュメント
 ├── poc/                          Phase 0 技術検証コード
-└── model/                        埋め込みモデル置き場 (git 管理外)
-    └── Xenova/
-        └── multilingual-e5-small/
+├── tools/
+│   └── embed-parity/             .NET ↔ transformers.js 埋め込み一致・DB 互換性チェック
+└── model/                        埋め込みモデル置き場 (git 管理外、インジェスト時に自動取得)
+    └── sirasagi62/
+        └── ruri-v3-30m-ONNX/
 ```
 
 ---
@@ -35,51 +37,55 @@ azuremoe-chat/
 
 ## 埋め込みモデルのセットアップ
 
-インジェストと検索ツールの両方が **Xenova/multilingual-e5-small** (ONNX 量子化版) を使用する。
+インジェスト・検索ツール・チャットアプリのすべてが **ruri-v3-30m** (ONNX, transformers.js 形式) を使用する。
+**手動ダウンロードは不要** — インジェスト実行時に足りないファイルを HuggingFace から自動取得し、`model/<モデルID>/` に保存する。
 
 ### モデルについて
 
 | 項目 | 値 |
 |---|---|
-| HuggingFace リポジトリ | [Xenova/multilingual-e5-small](https://huggingface.co/Xenova/multilingual-e5-small) |
-| ベースモデル | intfloat/multilingual-e5-small (XLM-RoBERTa ベース) |
-| パラメータ数 | 約 117M |
-| 埋め込み次元 | 384 |
-| 最大シーケンス長 | 512 トークン |
-| モデルファイルサイズ | `model_quantized.onnx` (INT8) — 約 118 MB |
-| 言語 | 100 言語対応 (日本語含む) |
+| HuggingFace リポジトリ | [sirasagi62/ruri-v3-30m-ONNX](https://huggingface.co/sirasagi62/ruri-v3-30m-ONNX) (トークナイザー同梱の ONNX 変換版) |
+| ベースモデル | [cl-nagoya/ruri-v3-30m](https://huggingface.co/cl-nagoya/ruri-v3-30m) (ModernBERT-Ja ベース、日本語特化) |
+| リビジョン | `cdf9391f1ff2198daa8f63f7ccf97d7b3e7415a0` に固定 (`EmbeddingProfile.cs`) |
+| パラメータ数 | 約 37M |
+| 埋め込み次元 | 256 |
+| 最大シーケンス長 | 8192 トークン |
+| モデルファイル | `onnx/model_quantized.onnx` (dtype `q8`) — 約 37 MB |
+| prefix | クエリ `検索クエリ: ` / 文書 `検索文書: ` |
+| JMTEB Retrieval | 78.08 (参考: multilingual-e5-small は 67.27) |
+| ライセンス | Apache-2.0 |
 
-### ダウンロード手順
+モデル ID・リビジョン・dtype・prefix は `manifest.json` に記録され、チャットアプリはそれに従ってクエリを埋め込む。
+DB と異なるモデルでクエリを埋め込む事故を防ぐため、appsettings.json の `EmbeddingModelId` / `EmbeddingDtype` はフォールバック扱い。
 
-以下のファイルを `model/Xenova/multilingual-e5-small/` に配置する。
+> 旧モデル `Xenova/multilingual-e5-small` も `--EmbeddingModel Xenova/multilingual-e5-small` で引き続き利用できる。
+> ruri の 130m / 310m 版に差し替える場合は `EmbeddingProfile.cs` にプロファイルを追加する。
 
-**必要なファイル:**
+### ブラウザ側との一致確認 (`tools/embed-parity`)
 
-```
-model/Xenova/multilingual-e5-small/
-├── tokenizer.json                 トークナイザー設定
-├── tokenizer_config.json          トークナイザー設定
-├── special_tokens_map.json        特殊トークン定義
-├── sentencepiece.bpe.model        SentencePiece モデル (~4.9 MB)
-└── onnx/
-    └── model_quantized.onnx       INT8 量子化モデル (~118 MB)  ← 必須
-```
+埋め込みモデルや transformers.js / LadybugDB のバージョンを変えたら、**全件インジェストの前に**次を実行する。
 
-> `model.onnx` (FP32 フル精度, ~470 MB) も使用可能。`model_quantized.onnx` が優先される。
+```powershell
+# 1. .NET 側でサンプル文を埋め込み、トークン ID とベクトルを書き出す
+dotnet run --project src/AzureMoe.Chat.Ingest -- embed-dump tools/embed-parity/texts.json tools/embed-parity/dump.json
 
-**方法 1: huggingface-hub (推奨)**
+# 2. 少数件で試しに DB を作る
+dotnet run --project src/AzureMoe.Chat.Ingest -- --MaxPosts 10 --NoLlm --OutDir out\smoke
 
-```bash
-pip install huggingface-hub
-huggingface-cli download Xenova/multilingual-e5-small \
-  tokenizer.json tokenizer_config.json special_tokens_map.json sentencepiece.bpe.model \
-  onnx/model_quantized.onnx \
-  --local-dir model/Xenova/multilingual-e5-small
+# 3. transformers.js (ブラウザと同じ固定バージョン) と比較し、DB を wasm エンジンで開いて検索する
+cd tools\embed-parity
+npm install
+node check.mjs dump.json ..\..\out\smoke\<blog-XXXX>.lbdb "Azure Container Apps の新機能"
 ```
 
-**方法 2: 手動ダウンロード**
+確認内容:
+- クエリのトークン ID が完全一致し、ベクトルの cosine 類似度が 0.999 以上であること
+- manifest の埋め込み設定が dump と一致すること
+- ネイティブで構築した DB が wasm エンジンで開け、ベクトル検索と rag-worker.js が発行する Cypher がすべて通ること
 
-HuggingFace の [Files タブ](https://huggingface.co/Xenova/multilingual-e5-small/tree/main) から上記ファイルを個別にダウンロードし、フォルダ構成通りに配置する。
+> 文書 (passage) 側の不一致は参考表示のみ。transformers.js の Unigram トークナイザーは `byte_fallback` 未対応で、
+> 改行が `<unk>` になる (.NET 側は HF tokenizers と同じ `<0x0A>`)。文書は .NET でしか埋め込まないため問題ない。
+> クエリは両側で空白・改行を 1 スペースに正規化してから埋め込む (`EmbeddingProfile.NormalizeQuery` / `rag-worker.js normalizeQuery`)。
 
 ---
 
@@ -121,7 +127,9 @@ dotnet run --project src/AzureMoe.Chat.Ingest
 
 | 引数 | 環境変数 | デフォルト | 説明 |
 |---|---|---|---|
-| `--ModelDir` | — | `model/Xenova/multilingual-e5-small` | ONNX モデルのディレクトリパス |
+| `--EmbeddingModel` | — | `sirasagi62/ruri-v3-30m-ONNX` | 埋め込みモデル ID (`EmbeddingProfile.cs` に定義済みのもの) |
+| `--EmbeddingDtype` | — | `q8` | transformers.js 準拠の dtype 名 (`q8` → `onnx/model_quantized.onnx`、`fp32` → `onnx/model.onnx` など)。ファイルが無い場合のフォールバックはしない |
+| `--ModelDir` | — | `model/<EmbeddingModel>` | モデルのディレクトリパス。足りないファイルは固定リビジョンから自動ダウンロード |
 
 #### ローカル LLM (エンティティ抽出)
 
@@ -156,7 +164,8 @@ Azure Update 記事のサービス名は HTML の H2 構造から確定的に取
 ```json
 {
   "XmlDir": ".tmp",
-  "ModelDir": "model/Xenova/multilingual-e5-small",
+  "EmbeddingModel": "sirasagi62/ruri-v3-30m-ONNX",
+  "EmbeddingDtype": "q8",
   "LlmBaseUrl": "http://localhost:11434/v1",
   "LlmModel": "qwen3:8b",
   "OutDir": "out"
@@ -167,7 +176,7 @@ Azure Update 記事のサービス名は HTML の H2 構造から確定的に取
 
 ```
 out/
-├── blog-20260614120000.lbdb    GraphDB ファイル (Ladybug 0.17.x 形式)
+├── blog-20260614120000.lbdb    GraphDB ファイル (Ladybug 0.19.x 形式)
 └── manifest.json         メタデータ (モデル情報・件数・SHA-256)
 ```
 
@@ -200,7 +209,9 @@ dotnet run --project src/AzureMoe.Chat.Ingest -- inspect --query "2026年2月の
 | (位置引数) | (自動検出) | 対象 `.lbdb` ファイルパス |
 | `--cypher "..."` | — | 任意の Cypher を実行して結果を表示 |
 | `--query "..."` | — | 自然文を埋め込んでベクトル検索 (上位 `--topk` 件) |
-| `--model` | `model/Xenova/multilingual-e5-small` | `--query` 用 ONNX モデルのディレクトリ |
+| `--embedding` | `sirasagi62/ruri-v3-30m-ONNX` | `--query` 用の埋め込みモデル ID (DB の manifest.json の `embeddingModel` に合わせる) |
+| `--model` | `model/<--embedding>` | `--query` 用モデルのディレクトリ |
+| `--dtype` | `q8` | `--query` 用 dtype (manifest.json の `embeddingDtype` に合わせる) |
 | `--topk` | `8` | `--query` で返す件数 |
 
 ---
@@ -242,7 +253,8 @@ dotnet run --project src/AzureMoe.Chat.Ingest -- append \
 | `<sourceDbPath>` (位置 2) | — | コピー元の `.lbdb` ファイルパス |
 | `--Override` | `false` | 同じ URL の Post が既に存在する場合に削除して上書きする |
 | `--OutDir` | `out` | 出力 `.lbdb` と `manifest.json` の書き出し先 |
-| `--ModelDir` | `model/Xenova/multilingual-e5-small` | ONNX 埋め込みモデルのディレクトリ |
+| `--EmbeddingModel` / `--EmbeddingDtype` | `sirasagi62/ruri-v3-30m-ONNX` / `q8` | 埋め込みモデル。元 DB と同じフォルダに manifest.json があれば一致を確認し、異なる場合は中断する |
+| `--ModelDir` | `model/<EmbeddingModel>` | 埋め込みモデルのディレクトリ |
 | `--LlmBaseUrl` | `http://localhost:11434/v1` | LLM エンドポイント |
 | `--LlmModel` | `qwen3:8b` | LLM モデル名 |
 | `--LlmApiKey` | (なし) | LLM API キー |
@@ -315,7 +327,7 @@ dotnet run --project src/AzureMoe.Chat.Ingest -- append \
 | `sectionTitle` | STRING | 直前の H2/H3 見出しテキスト |
 | `serviceName` | STRING | Azure Update 記事のみ: H2 のサービス名。通常記事は空文字 |
 | `chunkType` | STRING | `"update_item"` (Update 記事の箇条書き) / `"prose"` (通常テキスト) |
-| `emb` | FLOAT[384] | multilingual-e5-small による埋め込みベクトル |
+| `emb` | FLOAT[256] | ruri-v3-30m による埋め込みベクトル (次元は manifest.json の `embeddingDim`) |
 
 ---
 
@@ -371,7 +383,9 @@ dotnet run --project src/AzureMoe.Chat.Verify -- --TopK 10
 |---|---|---|
 | `--DbPath` | (自動検出) | 検索対象の `.lbdb` ファイルパス |
 | `--OutDir` | `out` | `DbPath` 未指定時に最新 `.lbdb` を探すディレクトリ |
-| `--ModelDir` | `model/Xenova/multilingual-e5-small` | ONNX モデルのディレクトリパス |
+| `--EmbeddingModel` | `sirasagi62/ruri-v3-30m-ONNX` | 埋め込みモデル ID (DB 構築時と同じもの) |
+| `--EmbeddingDtype` | `q8` | 埋め込み dtype (DB 構築時と同じもの) |
+| `--ModelDir` | `model/<EmbeddingModel>` | モデルのディレクトリパス |
 | `--TopK` | `5` | 返す検索結果の件数 |
 
 ### 起動後の操作
@@ -401,7 +415,7 @@ LadybugDB (WASM)・transformers.js をすべてブラウザ内で実行する。
 | LLM (テキスト生成) | Chrome 組み込み AI | Gemini Nano | ダウンロード不要・最優先 |
 | LLM (テキスト生成) | transformers.js | `onnx-community/Qwen2.5-0.5B-Instruct` (q4) | Chrome AI 非対応時に自動ダウンロード |
 | LLM (テキスト生成) | OpenAI 互換 HTTP | 任意 (LM Studio / Ollama 等) | `/llm` コマンドで実行中に切替可 |
-| 埋め込み | transformers.js | `Xenova/multilingual-e5-small` | 起動時に自動ダウンロード |
+| 埋め込み | transformers.js | `sirasagi62/ruri-v3-30m-ONNX` (manifest.json に従う) | 起動時に自動ダウンロード |
 
 モデルは transformers.js が Hugging Face Hub からダウンロードし、Cache API で自動キャッシュする。
 2 回目以降はオフラインでも動作する。
@@ -496,8 +510,7 @@ dotnet run --project src/AzureMoe.Chat.Web
 | `LlmModelId` | `onnx-community/Qwen2.5-0.5B-Instruct` | LLM モデル ID (HuggingFace) |
 | `LlmDtype` | `q4` | 量子化精度。`q4` / `q8` / `fp16` など |
 | `LlmMaxNewTokens` | `4096` | 最終回答の最大生成トークン数 (上限。EOS で自然停止) |
-| `LlmEvalMaxTokens` | `512` | 充足判定 (Deep) の最大トークン数 |
-| `EmbeddingModelId` | `Xenova/multilingual-e5-small` | 埋め込みモデル ID (HuggingFace) |
+| `EmbeddingModelId` | `sirasagi62/ruri-v3-30m-ONNX` | 埋め込みモデル ID。manifest.json に記録があればそちらを優先 (フォールバック用) |
 | `RetrievalMode` | `Normal` | 探索の深さ。`Fast` / `Normal` / `Deep` (UI の `/mode` でも変更可) |
 | `RagTopK` | `6` | HTTP LLM モード時の最終参照数上限 |
 | `MaxContextChars` | `6000` | HTTP LLM モード時に LLM へ渡す文脈の最大文字数 |

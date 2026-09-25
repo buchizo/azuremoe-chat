@@ -50,9 +50,9 @@ public sealed class GraphBuilder : IDisposable
 
         // --- schema ---------------------------------------------------------
         // Detect embedding dimension from the first chunk that has an embedding.
-        // Falls back to the E5 default (384) if no embeddings are present.
+        // Falls back to the default model's dimension if no embeddings are present.
         var embeddingDim = chunks.FirstOrDefault(c => c.Embedding?.Length > 0)?.Embedding!.Length
-                           ?? GraphSchema.EmbeddingDim;
+                           ?? EmbeddingProfile.Default.Dim;
 
         log($"スキーマ作成中 (埋め込み次元: {embeddingDim})...");
         Exec("INSTALL vector");

@@ -67,8 +67,7 @@ public sealed class RagInterop : IAsyncDisposable
     /// retrieval falls back to keyword search (for memory-constrained devices).</summary>
     public async ValueTask InitAsync(
         byte[] dbBytes,
-        string embeddingModelId,
-        string embeddingDtype = "q8",
+        EmbeddingSpec embedding,
         IProgress<(string Stage, string File, int Pct)>? progress = null,
         bool skipEmbedding = false,
         CancellationToken ct = default)
@@ -80,7 +79,7 @@ public sealed class RagInterop : IAsyncDisposable
         var m = await GetModuleAsync();
         var workerUrl = _nav.BaseUri.TrimEnd('/') + "/js/rag-worker.js";
         await m.InvokeVoidAsync("createRagWorker", ct, workerUrl);
-        await m.InvokeAsync<object>("initRag", ct, dbBytes, embeddingModelId, embeddingDtype, _dotnetRef, skipEmbedding);
+        await m.InvokeAsync<object>("initRag", ct, dbBytes, embedding, _dotnetRef, skipEmbedding);
         _initialised = true;
     }
 

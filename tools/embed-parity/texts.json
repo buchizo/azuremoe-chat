@@ -1,0 +1,9 @@
+[
+  "Azure Functions の最近のアップデートを教えて",
+  "Azure Kubernetes Service (AKS)\n\nAKS で Kubernetes 1.33 のサポートが一般提供 (GA) になりました。ノードプールの自動アップグレードも改善されています。",
+  "Azure Update 2026年6月 — Azure Container Apps\n\nサーバーレス GPU がパブリックプレビューになりました。",
+  "Blazor WebAssembly と LadybugDB でブラウザ内 GraphRAG を作る — 構成\n\n全角英数字ＡＢＣ１２３や半角ｶﾀｶﾅ、記号「」（）・…〜を含むテキスト。\nURL っぽい文字列 example.com/path?x=1 も入れておく。",
+  "What are the benefits of running an LLM locally in the browser?",
+  "Copilot",
+  "   先頭と末尾に空白がある入力   "
+]

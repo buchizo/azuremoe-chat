@@ -83,16 +83,16 @@ public sealed class GraphInspector : IDisposable
     }
 
     /// <summary>
-    /// Embed a natural-language query with the same E5 model used at ingest and
+    /// Embed a natural-language query with the same model used at ingest and
     /// run the vector index, printing the top-K chunks. Verifies that a given
     /// question retrieves the articles you'd expect.
     /// </summary>
-    public void SampleVectorSearch(string queryText, string modelDir, int topK, string dtype)
+    public void SampleVectorSearch(string queryText, string modelDir, EmbeddingProfile profile, int topK, string dtype)
     {
-        // dtype must match the one the DB was built with — a mismatched ONNX
-        // quantisation embeds queries in a subtly different vector space and
-        // makes this diagnostic lie about retrieval quality.
-        using var embedder = new E5Embedder(modelDir, dtype);
+        // model and dtype must match the ones the DB was built with — a mismatch
+        // embeds queries in a different vector space and makes this diagnostic
+        // lie about retrieval quality.
+        using var embedder = new OnnxEmbedder(modelDir, profile, dtype);
         var vec  = embedder.EmbedQuery(queryText);
         var vals = string.Join(",", vec.Select(v => v.ToString("R", CultureInfo.InvariantCulture)));
         var cypher = $"""

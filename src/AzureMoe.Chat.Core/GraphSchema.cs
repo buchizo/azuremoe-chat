@@ -12,18 +12,10 @@ public static class GraphSchema
     /// browser's @ladybugdb/wasm-core version (storage format compatibility).</summary>
     public const string EngineVersion = "0.19.1";
 
-    /// <summary>Embedding dimension of multilingual-e5-small.</summary>
-    public const int EmbeddingDim = 384;
-
-    /// <summary>Embedding model id (same ONNX on both sides — see POC-3).</summary>
-    public const string EmbeddingModel = "Xenova/multilingual-e5-small";
-
-    /// <summary>Quantization dtype used on both ingest and browser sides.</summary>
-    public const string EmbeddingDtype = "q4";
-
-    // e5 requires these prefixes; queries and passages live in different "modes".
-    public const string QueryPrefix = "query: ";
-    public const string PassagePrefix = "passage: ";
+    /// <summary>Default quantization dtype used on both ingest and browser sides.
+    /// q8 (model_quantized.onnx) is the smallest file for ruri-v3-30m — its q4
+    /// export leaves the 100K-vocab embedding table unquantized and ends up larger.</summary>
+    public const string EmbeddingDtype = "q8";
 
     /// <summary>
     /// DDL run once when building a fresh database. Order matters: node tables
@@ -60,8 +52,8 @@ public static class GraphSchema
         "CREATE REL TABLE ABOUT_SERVICE(FROM Chunk TO AzureService)",
     ];
 
-    /// <summary>DDL using the default E5 embedding dimension (384).</summary>
-    public static IReadOnlyList<string> SchemaDdl => GetSchemaDdl(EmbeddingDim);
+    /// <summary>DDL using the default embedding model's dimension.</summary>
+    public static IReadOnlyList<string> SchemaDdl => GetSchemaDdl(EmbeddingProfile.Default.Dim);
 
     /// <summary>Extract (year, month) from an ISO-8601 date string ("2026-02-25T…").
     /// Returns (0, 0) when the prefix isn't a parseable yyyy-MM.</summary>

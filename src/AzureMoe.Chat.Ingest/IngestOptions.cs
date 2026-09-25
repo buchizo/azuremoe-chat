@@ -45,26 +45,30 @@ public sealed class IngestOptions
     /// Useful for testing the rest of the pipeline without a running LLM.</summary>
     public bool NoLlm { get; set; }
 
-    // --- Embeddings (multilingual-e5-small, ONNX local) -------------------
+    // --- Embeddings (ONNX local) ------------------------------------------
 
     /// <summary>
-    /// Directory containing the Xenova/multilingual-e5-small ONNX model files.
-    /// Expected layout:
-    ///   {ModelDir}/tokenizer.json
-    ///   {ModelDir}/onnx/model_quantized.onnx  (q8/INT8, ~34 MB, default)
-    ///   {ModelDir}/onnx/model_q4.onnx          (q4/INT4, ~17 MB, if available)
-    ///   {ModelDir}/onnx/model.onnx             (fp32, ~117 MB)
-    ///
-    /// Download from HuggingFace: Xenova/multilingual-e5-small
+    /// HuggingFace model id of a known <see cref="AzureMoe.Chat.Core.EmbeddingProfile"/>.
+    /// Default: sirasagi62/ruri-v3-30m-ONNX. The browser follows whatever the
+    /// manifest records, so switching here only needs a rebuild + upload.
     /// </summary>
-    public string ModelDir { get; set; } = "model/Xenova/multilingual-e5-small";
+    public string EmbeddingModel { get; set; } = AzureMoe.Chat.Core.EmbeddingProfile.Default.ModelId;
 
     /// <summary>
-    /// ONNX quantization dtype. Must match the browser-side EmbeddingDtype in
-    /// appsettings.json so query and passage vectors share the same space.
-    /// Supported: "q8" (INT8, default), "q4" (INT4), "fp16", "fp32".
+    /// Directory holding the model files (tokenizer.json, onnx/*.onnx).
+    /// Default: model/{EmbeddingModel}. Missing files are downloaded from
+    /// HuggingFace at the profile's pinned revision.
     /// </summary>
-    public string EmbeddingDtype { get; set; } = "q4";
+    public string? ModelDir { get; set; }
+
+    /// <summary>
+    /// ONNX quantization dtype, named as in transformers.js ("q8" → model_quantized.onnx,
+    /// "fp32" → model.onnx, ...). Recorded in the manifest; the browser loads the same file.
+    /// </summary>
+    public string EmbeddingDtype { get; set; } = AzureMoe.Chat.Core.GraphSchema.EmbeddingDtype;
+
+    public string ResolveModelDir(AzureMoe.Chat.Core.EmbeddingProfile profile) =>
+        string.IsNullOrWhiteSpace(ModelDir) ? Path.Combine("model", profile.ModelId) : ModelDir;
 
     // --- Output ------------------------------------------------------------
 

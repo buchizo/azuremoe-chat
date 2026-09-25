@@ -15,6 +15,10 @@ public sealed record Manifest
     [JsonPropertyName("embeddingModel")] public required string EmbeddingModel { get; init; }
     [JsonPropertyName("embeddingDim")] public required int EmbeddingDim { get; init; }
     [JsonPropertyName("embeddingDtype")] public string? EmbeddingDtype { get; init; }
+    // The browser embeds queries with exactly these (see EmbeddingProfile).
+    [JsonPropertyName("embeddingRevision")]      public string? EmbeddingRevision      { get; init; }
+    [JsonPropertyName("embeddingQueryPrefix")]   public string? EmbeddingQueryPrefix   { get; init; }
+    [JsonPropertyName("embeddingPassagePrefix")] public string? EmbeddingPassagePrefix { get; init; }
 
     /// <summary>Object key of the DB file in the bucket (e.g. "blog-20260613.lbdb").</summary>
     [JsonPropertyName("databaseFile")] public required string DatabaseFile { get; init; }

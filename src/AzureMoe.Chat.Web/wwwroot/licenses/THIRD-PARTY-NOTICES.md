@@ -25,11 +25,12 @@
 
 ## 埋め込みモデル
 
-### Xenova/multilingual-e5-small
+### sirasagi62/ruri-v3-30m-ONNX
 
-- **ライセンス:** MIT License
-- **元モデル:** intfloat/multilingual-e5-small (MIT)
-- **リンク:** https://huggingface.co/intfloat/multilingual-e5-small
+- **ライセンス:** Apache License 2.0
+- **元モデル:** cl-nagoya/ruri-v3-30m (Apache-2.0)
+- **リンク:** https://huggingface.co/cl-nagoya/ruri-v3-30m
+- **ONNX 変換版:** https://huggingface.co/sirasagi62/ruri-v3-30m-ONNX
 
 ---
 
@@ -37,9 +38,9 @@
 
 | パッケージ | バージョン | ライセンス | リンク |
 |---|---|---|---|
-| @huggingface/transformers (transformers.js) | 4.2.0 | Apache-2.0 | https://github.com/huggingface/transformers.js |
+| @huggingface/transformers (transformers.js) | 4.3.0 | Apache-2.0 | https://github.com/huggingface/transformers.js |
 | onnxruntime-web (transformers.js 同梱) | — | MIT | https://github.com/microsoft/onnxruntime |
-| @ladybugdb/wasm-core | 0.17.1 | MIT | https://ladybugdb.com/ |
+| @ladybugdb/wasm-core | 0.19.1 | MIT | https://ladybugdb.com/ |
 
 ---
 
@@ -47,9 +48,9 @@
 
 | パッケージ | バージョン | ライセンス | リンク |
 |---|---|---|---|
-| Markdig | 0.37.0 | BSD-2-Clause | https://github.com/xoofx/markdig |
-| Microsoft.AspNetCore.Components.WebAssembly | 10.0.9 | MIT | https://github.com/dotnet/aspnetcore |
-| Microsoft.AspNetCore.Components.WebAssembly.DevServer | 10.0.9 | MIT (開発時のみ・非再配布) | https://github.com/dotnet/aspnetcore |
+| Markdig | 1.4.0 | BSD-2-Clause | https://github.com/xoofx/markdig |
+| Microsoft.AspNetCore.Components.WebAssembly | 10.0.12 | MIT | https://github.com/dotnet/aspnetcore |
+| Microsoft.AspNetCore.Components.WebAssembly.DevServer | 10.0.12 | MIT (開発時のみ・非再配布) | https://github.com/dotnet/aspnetcore |
 
 ---
 

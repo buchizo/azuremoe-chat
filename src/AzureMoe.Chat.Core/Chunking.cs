@@ -12,9 +12,10 @@ namespace AzureMoe.Chat.Core;
 /// </summary>
 public static partial class Chunking
 {
-    /// <summary>Target chunk size in characters. Japanese runs ~0.6-0.9 tokens/char
-    /// under XLM-R SentencePiece, and the embed input also carries a title/service
-    /// prefix — 600 chars keeps everything inside E5's 512-token window. Generation
+    /// <summary>Target chunk size in characters. Originally sized so chunk + title
+    /// prefix fit multilingual-e5-small's 512-token window (~0.6-0.9 tokens/char
+    /// under XLM-R SentencePiece); ruri-v3 allows 8192 tokens, but the size is
+    /// kept so the model switch stays the only retrieval variable. Generation
     /// context no longer depends on chunk size (see ContextEnricher), so smaller
     /// retrieval keys are strictly better.</summary>
     public const int TargetChars = 600;

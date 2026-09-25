@@ -1,0 +1,13 @@
+{
+  "name": "embed-parity",
+  "private": true,
+  "type": "module",
+  "description": "Checks that ingest-side (.NET ONNX Runtime) and browser-side (transformers.js) embeddings match, and that a built DB opens in the wasm engine.",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "4.3.0",
+    "@ladybugdb/wasm-core": "0.19.1"
+  }
+}

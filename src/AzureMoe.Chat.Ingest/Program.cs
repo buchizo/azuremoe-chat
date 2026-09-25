@@ -8,7 +8,7 @@ using Microsoft.Extensions.Configuration;
 // `inspect` subcommand — read-only diagnostics over a built .lbdb.
 //   dotnet run --project src/AzureMoe.Chat.Ingest -- inspect [dbPath]
 //   ... inspect <dbPath> --cypher "MATCH (n) RETURN count(n)"
-//   ... inspect <dbPath> --query "2026年2月のAzure Functionsの更新" [--model <dir>] [--topk 8]
+//   ... inspect <dbPath> --query "2026年2月のAzure Functionsの更新" [--embedding <modelId>] [--model <dir>] [--dtype q8] [--topk 8]
 // ---------------------------------------------------------------------------
 if (args.Length > 0 && args[0].Equals("inspect", StringComparison.OrdinalIgnoreCase))
     return RunInspect(args[1..]);
@@ -21,6 +21,15 @@ if (args.Length > 0 && args[0].Equals("inspect", StringComparison.OrdinalIgnoreC
 // ---------------------------------------------------------------------------
 if (args.Length > 0 && args[0].Equals("append", StringComparison.OrdinalIgnoreCase))
     return await RunAppendAsync(args[1..]);
+
+// ---------------------------------------------------------------------------
+// `embed-dump` subcommand — embed sample texts and write token ids + vectors as
+// JSON, for the parity check against transformers.js (tools/embed-parity).
+//   dotnet run --project src/AzureMoe.Chat.Ingest -- embed-dump <texts.json> <out.json>
+//   ... [--EmbeddingModel <id>] [--EmbeddingDtype q8] [--ModelDir <dir>]
+// ---------------------------------------------------------------------------
+if (args.Length > 0 && args[0].Equals("embed-dump", StringComparison.OrdinalIgnoreCase))
+    return await RunEmbedDumpAsync(args[1..]);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -47,6 +56,9 @@ if (Environment.GetEnvironmentVariable("LLM_BASE_URL") is { } envUrl)   opt.LlmB
 if (Environment.GetEnvironmentVariable("LLM_MODEL")    is { } envModel) opt.LlmModel   = envModel;
 opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
 
+var profile  = EmbeddingProfile.Resolve(opt.EmbeddingModel);
+var modelDir = opt.ResolveModelDir(profile);
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -59,7 +71,7 @@ var manifestPath = Path.Combine(opt.OutDir, "manifest.json");
 Console.WriteLine($"XML ディレクトリ : {Path.GetFullPath(opt.XmlDir)}");
 Console.WriteLine($"出力先           : {Path.GetFullPath(opt.OutDir)}");
 Console.WriteLine($"DB               : {dbFileName}");
-Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}  [{opt.EmbeddingDtype}]");
+Console.WriteLine($"Embedding モデル : {profile.ModelId}@{profile.Revision[..7]}  [{opt.EmbeddingDtype}]  ({Path.GetFullPath(modelDir)})");
 if (opt.NoLlm)
     Console.WriteLine($"LLM              : (スキップ)");
 else
@@ -133,10 +145,11 @@ try
     ContextEnricher.Enrich(chunks);
 
     // -----------------------------------------------------------------------
-    // Step 3: Embed (multilingual-e5-small ONNX, local)
+    // Step 3: Embed (ONNX, local)
     // -----------------------------------------------------------------------
-    Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、モデル: {opt.ModelDir} [{opt.EmbeddingDtype}])...");
-    using var embedder = new E5Embedder(opt.ModelDir, opt.EmbeddingDtype);
+    Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、モデル: {profile.ModelId} [{opt.EmbeddingDtype}])...");
+    using var embedder = await OnnxEmbedder.CreateAsync(
+        modelDir, profile, opt.EmbeddingDtype, msg => Console.WriteLine($"  {msg}"), cts.Token);
 
     // Update post chunks: prepend service name so the vector captures both the
     // service identity and the update content.
@@ -152,7 +165,7 @@ try
     }
     Console.WriteLine("完了");
     if (embedder.TruncatedCount > 0)
-        Console.WriteLine($"  [warn] 512トークン超過で末尾切り捨て: {embedder.TruncatedCount}/{chunks.Count} チャンク");
+        Console.WriteLine($"  [warn] {profile.MaxTokens}トークン超過で末尾切り捨て: {embedder.TruncatedCount}/{chunks.Count} チャンク");
 
     // -----------------------------------------------------------------------
     // Step 4: Extract entities + Azure service names (unless --NoLlm)
@@ -216,10 +229,13 @@ try
 
     var manifest = new Manifest
     {
-        EngineVersion  = GraphSchema.EngineVersion,
-        EmbeddingModel = GraphSchema.EmbeddingModel,
-        EmbeddingDim   = embedder.Dimension > 0 ? embedder.Dimension : GraphSchema.EmbeddingDim,
-        EmbeddingDtype = opt.EmbeddingDtype,
+        EngineVersion          = GraphSchema.EngineVersion,
+        EmbeddingModel         = profile.ModelId,
+        EmbeddingDim           = embedder.Dimension > 0 ? embedder.Dimension : profile.Dim,
+        EmbeddingDtype         = opt.EmbeddingDtype,
+        EmbeddingRevision      = profile.Revision,
+        EmbeddingQueryPrefix   = profile.QueryPrefix,
+        EmbeddingPassagePrefix = profile.PassagePrefix,
         DatabaseFile   = dbFileName,
         DatabaseBytes  = dbBytes,
         DatabaseSha256 = dbSha256,
@@ -259,7 +275,7 @@ catch (Exception ex)
 // Articles: post title, plus the section heading when there is one, so the
 // vector captures which part of the article the chunk came from. Dates are
 // deliberately NOT embedded — date filtering is structural (year/month columns)
-// and e5-small handles numerals poorly.
+// and small embedding models handle numerals poorly.
 static string BuildEmbedInput(Chunk chunk, string postTitle)
 {
     if (chunk.ChunkType == "update_item" && !string.IsNullOrEmpty(chunk.ServiceName))
@@ -330,6 +346,31 @@ static async Task<int> RunAppendAsync(string[] rest)
     if (Environment.GetEnvironmentVariable("LLM_MODEL")    is { } envModel) opt.LlmModel   = envModel;
     opt.LlmApiKey ??= Environment.GetEnvironmentVariable("LLM_API_KEY");
 
+    var profile  = EmbeddingProfile.Resolve(opt.EmbeddingModel);
+    var modelDir = opt.ResolveModelDir(profile);
+
+    // Appending vectors from a different model than the source DB was built
+    // with would mix two vector spaces in one index. Dimension checks can't
+    // catch a same-dimension swap, so compare against the source's manifest.
+    var srcManifestPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(sourceDbPath))!, "manifest.json");
+    if (File.Exists(srcManifestPath))
+    {
+        var src = JsonSerializer.Deserialize<Manifest>(await File.ReadAllTextAsync(srcManifestPath));
+        if (src is not null && Path.GetFileName(sourceDbPath) == src.DatabaseFile
+            && (src.EmbeddingModel != profile.ModelId || (src.EmbeddingDtype ?? "") != opt.EmbeddingDtype))
+        {
+            Console.Error.WriteLine(
+                $"ソースDB の埋め込みモデル ({src.EmbeddingModel} [{src.EmbeddingDtype}]) と " +
+                $"指定モデル ({profile.ModelId} [{opt.EmbeddingDtype}]) が異なります。" +
+                "--EmbeddingModel / --EmbeddingDtype を合わせるか、フルビルドし直してください。");
+            return 1;
+        }
+    }
+    else
+    {
+        Console.WriteLine($"[warn] {srcManifestPath} が無いため、ソースDB の埋め込みモデルとの一致を確認できません。");
+    }
+
     Directory.CreateDirectory(opt.OutDir);
     var dateStamp    = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
     var dbFileName   = $"blog-{dateStamp}.lbdb";
@@ -339,7 +380,7 @@ static async Task<int> RunAppendAsync(string[] rest)
     Console.WriteLine($"URL              : {url}");
     Console.WriteLine($"ソースDB         : {Path.GetFullPath(sourceDbPath)}");
     Console.WriteLine($"出力DB           : {Path.GetFullPath(dbPath)}");
-    Console.WriteLine($"Embedding モデル : {Path.GetFullPath(opt.ModelDir)}  [{opt.EmbeddingDtype}]");
+    Console.WriteLine($"Embedding モデル : {profile.ModelId}@{profile.Revision[..7]}  [{opt.EmbeddingDtype}]  ({Path.GetFullPath(modelDir)})");
     Console.WriteLine($"上書きモード     : {(overrideMode ? "あり (--Override)" : "なし")}");
     if (opt.NoLlm)
         Console.WriteLine($"LLM              : (スキップ)");
@@ -463,16 +504,17 @@ static async Task<int> RunAppendAsync(string[] rest)
 
             // Step 6: Embed
             Console.WriteLine($"埋め込み生成中 ({chunks.Count} チャンク、dtype={opt.EmbeddingDtype})...");
-            using var embedder = new E5Embedder(opt.ModelDir, opt.EmbeddingDtype);
+            using var embedder = await OnnxEmbedder.CreateAsync(
+                modelDir, profile, opt.EmbeddingDtype, msg => Console.WriteLine($"  {msg}"), cts.Token);
             for (var i = 0; i < chunks.Count; i++)
             {
                 cts.Token.ThrowIfCancellationRequested();
                 chunks[i].Embedding = embedder.EmbedPassage(BuildEmbedInput(chunks[i], post.Title));
             }
-            embeddingDim = embedder.Dimension > 0 ? embedder.Dimension : GraphSchema.EmbeddingDim;
+            embeddingDim = embedder.Dimension > 0 ? embedder.Dimension : profile.Dim;
             Console.WriteLine($"  完了 (dim={embedder.Dimension})");
             if (embedder.TruncatedCount > 0)
-                Console.WriteLine($"  [warn] 512トークン超過で末尾切り捨て: {embedder.TruncatedCount}/{chunks.Count} チャンク");
+                Console.WriteLine($"  [warn] {profile.MaxTokens}トークン超過で末尾切り捨て: {embedder.TruncatedCount}/{chunks.Count} チャンク");
 
             // Step 7: Extract entities + Azure service names (unless --NoLlm)
             var extractions = new Dictionary<long, Extraction>();
@@ -518,10 +560,13 @@ static async Task<int> RunAppendAsync(string[] rest)
 
         var manifest = new Manifest
         {
-            EngineVersion  = GraphSchema.EngineVersion,
-            EmbeddingModel = GraphSchema.EmbeddingModel,
-            EmbeddingDim   = embeddingDim,
-            EmbeddingDtype = opt.EmbeddingDtype,
+            EngineVersion          = GraphSchema.EngineVersion,
+            EmbeddingModel         = profile.ModelId,
+            EmbeddingDim           = embeddingDim,
+            EmbeddingDtype         = opt.EmbeddingDtype,
+            EmbeddingRevision      = profile.Revision,
+            EmbeddingQueryPrefix   = profile.QueryPrefix,
+            EmbeddingPassagePrefix = profile.PassagePrefix,
             DatabaseFile   = dbFileName,
             DatabaseBytes  = dbBytes,
             DatabaseSha256 = dbSha256,
@@ -554,6 +599,55 @@ static async Task<int> RunAppendAsync(string[] rest)
 }
 
 // ---------------------------------------------------------------------------
+// embed-dump subcommand implementation
+// ---------------------------------------------------------------------------
+static async Task<int> RunEmbedDumpAsync(string[] rest)
+{
+    var positional = new List<string>();
+    var configArgs = new List<string>();
+    for (var i = 0; i < rest.Length; i++)
+    {
+        if (rest[i].StartsWith("--") && i + 1 < rest.Length) { configArgs.Add(rest[i]); configArgs.Add(rest[++i]); }
+        else positional.Add(rest[i]);
+    }
+    if (positional.Count < 2)
+    {
+        Console.Error.WriteLine("使用方法: embed-dump <texts.json> <out.json> [--EmbeddingModel <id>] [--EmbeddingDtype q8] [--ModelDir <dir>]");
+        return 1;
+    }
+
+    var opt = new IngestOptions();
+    new ConfigurationBuilder().AddCommandLine(configArgs.ToArray()).Build().Bind(opt);
+    var profile = EmbeddingProfile.Resolve(opt.EmbeddingModel);
+
+    // Input: a JSON array of raw strings. Each is embedded both as a passage and
+    // as a query, so both prefixes (and query normalisation) go through the comparison.
+    var texts = JsonSerializer.Deserialize<string[]>(await File.ReadAllTextAsync(positional[0])) ?? [];
+    using var embedder = await OnnxEmbedder.CreateAsync(
+        opt.ResolveModelDir(profile), profile, opt.EmbeddingDtype, Console.WriteLine);
+
+    var items = new List<object>();
+    foreach (var t in texts)
+    {
+        foreach (var (kind, input, vec) in new[]
+                 {
+                     ("passage", profile.PassagePrefix + t, embedder.EmbedPassage(t)),
+                     ("query",   embedder.QueryInput(t),    embedder.EmbedQuery(t)),
+                 })
+            items.Add(new { kind, text = t, input, ids = embedder.Tokenize(input), vector = vec });
+    }
+
+    var dump = new
+    {
+        modelId = profile.ModelId, revision = profile.Revision, dtype = opt.EmbeddingDtype,
+        queryPrefix = profile.QueryPrefix, passagePrefix = profile.PassagePrefix, items,
+    };
+    await File.WriteAllTextAsync(positional[1], JsonSerializer.Serialize(dump));
+    Console.WriteLine($"{items.Count} 件を書き出しました: {Path.GetFullPath(positional[1])}");
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // inspect subcommand implementation
 // ---------------------------------------------------------------------------
 static int RunInspect(string[] rest)
@@ -582,11 +676,16 @@ static int RunInspect(string[] rest)
         if (Flag("--cypher") is { } cypher)
             inspector.RunCypher(cypher);
         else if (Flag("--query") is { } query)
+        {
+            // Must be the model/dtype the DB was built with (see its manifest.json).
+            var profile = EmbeddingProfile.Resolve(Flag("--embedding"));
             inspector.SampleVectorSearch(
                 query,
-                Flag("--model") ?? "model/Xenova/multilingual-e5-small",
+                Flag("--model") ?? Path.Combine("model", profile.ModelId),
+                profile,
                 int.TryParse(Flag("--topk"), out var k) ? k : 8,
                 Flag("--dtype") ?? GraphSchema.EmbeddingDtype);
+        }
         else
             inspector.PrintStats();
 
