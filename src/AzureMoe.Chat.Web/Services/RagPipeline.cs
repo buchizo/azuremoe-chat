@@ -127,41 +127,44 @@ public sealed class RagPipeline
         var qDate     = _analyzer.Analyze(userQuery).Date;
         var dateLabel = qDate is { Hard: true } ? qDate.Label : null;
 
-        Status("あずもが回答を考えています…");
-        var answer   = await GenerateAsync(BuildMessages(generationHistory, userQuery, context, dateLabel, strict: false));
-        var grounded = true;
-
         // Grounding check so the model can't quietly fall back to general
-        // knowledge. On failure, regenerate once with a stricter prompt.
-        // Skipped on the WASM fallback: the extra prefill pass costs 25-60 s
-        // there, versus a few seconds on WebGPU.
-        var verifyGrounding = _cfg.VerifyGrounding && !IsWasmDevice;
-        if (verifyGrounding && !string.IsNullOrWhiteSpace(answer))
+        // knowledge (see GroundingChecker). The user's question counts as
+        // evidence too: restating its terms is not drift.
+        IReadOnlyList<string> CheckGrounding(string text)
         {
-            Status("回答が参考情報に基づいているか確認しています…");
-            if (onDebug is not null) Debug("[debug] ▶ グラウンディング確認");
-            grounded = await IsGroundedAsync(answer, context, ct, onDebug);
-            if (onDebug is not null) Debug($"[debug] グラウンディング判定: {(grounded ? "OK" : "NG")}");
+            if (!_cfg.VerifyGrounding || string.IsNullOrWhiteSpace(text)) return [];
+            var found = GroundingChecker.FindUnsupported(text, context + "\n" + userQuery);
+            if (onDebug is not null)
+                Debug($"[debug] グラウンディング判定: {(found.Count == 0 ? "OK" : "NG — 参考情報に無い: " + string.Join(", ", found))}");
+            return found;
+        }
 
-            if (!grounded)
+        Status("あずもが回答を考えています…");
+        var answer      = await GenerateAsync(BuildMessages(generationHistory, userQuery, context, dateLabel, unsupported: null));
+        var unsupported = CheckGrounding(answer);
+
+        // On failure, regenerate once with a stricter prompt naming the offending
+        // terms. Checking is free on every device, but regenerating is not: on the
+        // WASM fallback a second generation costs 25-60 s, so there it only warns.
+        if (unsupported.Count > 0 && !IsWasmDevice)
+        {
+            Status("根拠に厳密に基づいて回答し直しています…");
+            var retry = await GenerateAsync(BuildMessages(generationHistory, userQuery, context, dateLabel, unsupported));
+            var retryUnsupported = CheckGrounding(retry);
+            // Keep whichever attempt drifted less; a strict retry can also come
+            // back empty or worse.
+            if (!string.IsNullOrWhiteSpace(retry) && retryUnsupported.Count <= unsupported.Count)
             {
-                Status("根拠に厳密に基づいて回答し直しています…");
-                var retry = await GenerateAsync(BuildMessages(generationHistory, userQuery, context, dateLabel, strict: true));
-                if (!string.IsNullOrWhiteSpace(retry))
-                {
-                    answer   = retry;
-                    if (onDebug is not null) Debug("[debug] ▶ グラウンディング再確認");
-                    grounded = await IsGroundedAsync(retry, context, ct, onDebug);
-                    if (onDebug is not null) Debug($"[debug] グラウンディング判定: {(grounded ? "OK" : "NG")}");
-                }
+                answer      = retry;
+                unsupported = retryUnsupported;
             }
         }
 
         // Commit the final answer once, then warn if it still isn't grounded.
         onCompleted?.Invoke(answer);
-        if (verifyGrounding && !grounded)
+        if (unsupported.Count > 0)
             onWarning?.Invoke(
-                "⚠ この回答には、参考情報だけでは確認できない内容が含まれている可能性があります。" +
+                $"⚠ この回答の「{string.Join("」「", unsupported.Take(5))}」は参考情報で確認できませんでした。" +
                 "下の参考記事で裏付けを確認してね。");
 
         return references;
@@ -252,34 +255,6 @@ public sealed class RagPipeline
         });
     }
 
-    // Max chars of context to send to the grounding check. The full 6 000-char
-    // context would force the model to process ~1 500 tokens just to output "OK"
-    // or "NG". Truncating to 2 000 chars cuts ~1 000 input tokens per check while
-    // still giving the model enough text to spot obvious hallucinations.
-    private const int GroundingContextCap = 2000;
-
-    /// <summary>Second LLM pass: is the answer supported only by the context?
-    /// Deliberately lenient on ambiguity (don't cry wolf) but flags clear drift
-    /// into facts/names/dates absent from the context.</summary>
-    private async ValueTask<bool> IsGroundedAsync(string answer, string context, CancellationToken ct,
-        Action<string>? onDebug = null)
-    {
-        var ctx = context.Length > GroundingContextCap ? context[..GroundingContextCap] : context;
-        var messages = new List<ChatMessage>
-        {
-            new("system",
-                "あなたは厳密な校正者です。『回答』が『参考情報』だけで裏付けられるか判定してください。" +
-                "参考情報に書かれていない事実・製品名・数値・日付が回答に含まれる場合は不合格です。" +
-                "裏付けられるなら『OK』、そうでなければ『NG』とだけ出力してください。"),
-            new("user", $"## 参考情報\n{ctx}\n\n## 回答\n{answer}\n\n判定（OK か NG のみ）:"),
-        };
-
-        if (onDebug is not null) onDebug(FormatPromptDebug("LLM グラウンディング確認プロンプト", messages));
-        var raw = (await _llm.CompleteAsync(messages, _cfg.LlmEvalMaxTokens, ct)).ToUpperInvariant();
-        // Treat only an explicit NG (without a competing OK) as ungrounded.
-        return !(raw.Contains("NG") && !raw.Contains("OK"));
-    }
-
     // ── Fast / Normal: one recall pass ────────────────────────────────────────
 
     private async ValueTask<IReadOnlyList<ChunkResult>> RetrieveOnceAsync(
@@ -292,6 +267,7 @@ public sealed class RagPipeline
         var opt     = OptionsFor(_cfg.RetrievalMode);
         var origQ   = _analyzer.Analyze(userQuery);
         var searchQ = searchQuery == userQuery ? origQ : _analyzer.Analyze(searchQuery);
+        if (onDebug is not null) onDebug(FormatDateDebug(origQ));
         return await _ragInterop.RetrieveAsync(userQuery, searchQuery, origQ, searchQ, opt, _cfg.RetrievalMode, onDebug, ct);
     }
 
@@ -307,6 +283,7 @@ public sealed class RagPipeline
         var opt     = OptionsFor(RetrievalMode.Deep);
         var origQ   = _analyzer.Analyze(userQuery);
         var searchQ = searchQuery == userQuery ? origQ : _analyzer.Analyze(searchQuery);
+        if (onDebug is not null) onDebug(FormatDateDebug(origQ));
         return await _ragInterop.RetrieveAsync(userQuery, searchQuery, origQ, searchQ, opt, RetrievalMode.Deep, onDebug, ct);
     }
 
@@ -390,6 +367,11 @@ public sealed class RagPipeline
         return sb.ToString().TrimEnd();
     }
 
+    private string FormatDateDebug(AnalyzedQuery q) => q.Date is { } d
+        ? $"[debug] 日付条件: {d.Label} {d.FromIso}〜{d.ToIso} ({(d.Hard ? "絞り込み" : "加点")})" +
+          (d.Hard ? "" : $"  データ最新日: {_analyzer.DataAsOf:yyyy-MM-dd}")
+        : "[debug] 日付条件: なし";
+
     private static string FormatResponseDebug(string label, string response) =>
         $"[debug] {label}: \"{Trunc(response)}\"";
 
@@ -401,16 +383,16 @@ public sealed class RagPipeline
         // Fast: pure vector, no graph traversal, fewest sources → quickest.
         RetrievalMode.Fast => new RetrievalOptions(
             FinalTopK: Math.Max(2, EffRagTopK - 1), VectorTopK: 12, UseGraph: false,
-            IncludeRelated: false, ExpansionLimit: 0, DateOverFetch: 300),
+            IncludeRelated: false, ExpansionLimit: 0),
         // Deep: wide recall + related-entity hop. Precision comes from the final
         // rank against the original question, so recall can be generous.
         RetrievalMode.Deep => new RetrievalOptions(
             FinalTopK: EffRagTopK, VectorTopK: 30, UseGraph: true,
-            IncludeRelated: true, ExpansionLimit: 14, DateOverFetch: 600),
+            IncludeRelated: true, ExpansionLimit: 14),
         // Normal: balanced graph expansion.
         _ => new RetrievalOptions(
             FinalTopK: EffRagTopK, VectorTopK: 24, UseGraph: true,
-            IncludeRelated: false, ExpansionLimit: 10, DateOverFetch: 400),
+            IncludeRelated: false, ExpansionLimit: 10),
     };
 
     private IReadOnlyList<ChatMessage> TrimHistory(IReadOnlyList<ChatMessage> history)
@@ -421,8 +403,10 @@ public sealed class RagPipeline
 
     private List<ChatMessage> BuildMessages(
         IReadOnlyList<ChatMessage> history, string userQuery, string context, string? dateLabel,
-        bool strict)
+        IReadOnlyList<string>? unsupported)
     {
+        // Non-null = strict retry after a failed grounding check.
+        var strict = unsupported is not null;
         var now  = DateTime.Now;
         var days = new[] { "日", "月", "火", "水", "木", "金", "土" };
         var sysPrompt = _cfg.SystemPrompt +
@@ -445,9 +429,14 @@ public sealed class RagPipeline
             sb.Append("## 質問（ユーザー入力）\n").Append(userQuery).Append("\n\n");
             sb.Append("## 参考情報（システム取得）\n\n").Append(context).Append("\n\n");
             if (strict)
-                sb.Append("## 重要\n前回の回答は参考情報で裏付けられていませんでした。今回は参考情報に明記された内容だけを、")
+            {
+                sb.Append("## 重要\n前回の回答は参考情報で裏付けられていませんでした");
+                if (unsupported!.Count > 0)
+                    sb.Append($"（特に「{string.Join("」「", unsupported.Take(5))}」は参考情報に書かれていません）");
+                sb.Append("。今回は参考情報に明記された内容だけを、")
                   .Append("該当する記事番号 [1] [2] を本文中に引用しながら答えてください。")
                   .Append("参考情報に書かれていないことは一切書かず、該当情報が無ければ「参考情報には載っていなかったよ、先輩」とだけ答えること。\n\n");
+            }
             if (!string.IsNullOrEmpty(dateLabel))
                 sb.Append($"## 重要な制約\nユーザーは「{dateLabel}」の情報を求めています。参考情報もすべて「{dateLabel}」のものです。")
                   .Append($"回答に書く年・月は必ず「{dateLabel}」に統一し、それ以外の年（2025年・2023年など）は絶対に書かないこと。\n\n");

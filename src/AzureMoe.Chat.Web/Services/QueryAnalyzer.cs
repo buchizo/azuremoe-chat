@@ -24,6 +24,13 @@ public sealed partial class QueryAnalyzer
     public QueryAnalyzer() : this(() => DateTime.UtcNow) { }
     public QueryAnalyzer(Func<DateTime> now) => _now = now;
 
+    /// <summary>Newest post date in the loaded DB (UTC), set by <see cref="RagInterop"/>
+    /// after init. Anchors vague recency ("最近"): the corpus is rebuilt by hand and
+    /// can lag today by months, and a wall-clock window would then match nothing.
+    /// Explicit periods (今月/先月/今年) stay on the real clock so the app never
+    /// passes old posts off as "this month".</summary>
+    public DateTime? DataAsOf { get; set; }
+
     public AnalyzedQuery Analyze(string query)
     {
         var date = ExtractDate(query);
@@ -68,11 +75,12 @@ public sealed partial class QueryAnalyzer
             if (m is >= 1 and <= 12) return Month(now.Year, m);
         }
 
-        // 最近 / 直近 / このごろ → soft preference for the last 90 days
+        // 最近 / 直近 / このごろ → soft preference for the 90 days up to the newest data
         if (q.Contains("最近") || q.Contains("直近") || q.Contains("このごろ") || q.Contains("この頃"))
         {
-            var from = now.AddDays(-90);
-            return new DateRange(from.ToString("yyyy-MM-dd"), now.AddDays(1).ToString("yyyy-MM-dd"), "最近", Hard: false);
+            var anchor = DataAsOf is { } asOf && asOf < now ? asOf : now;
+            var from   = anchor.AddDays(-90);
+            return new DateRange(from.ToString("yyyy-MM-dd"), anchor.AddDays(1).ToString("yyyy-MM-dd"), "最近", Hard: false);
         }
 
         return null;

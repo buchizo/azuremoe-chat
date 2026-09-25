@@ -41,6 +41,8 @@ function idList(ids) {
 
 // ── Constants (mirrors RetrievalEngine.cs) ─────────────────────────────────
 const AUTHORITY_K = 100;
+// In-window hits added to the relevance pool for a soft date window ("最近").
+const SOFT_WINDOW_K = 30;
 const GRAPH_BONUS = 0.08;
 const DATE_BOOST  = 0.05;
 // shared = how many of the 3 expansion routes (tag / entity / service) found
@@ -167,17 +169,28 @@ ORDER BY distance`,
   return rows.map(readChunk);
 }
 
-function vectorSearchInDateRange(vec, fromIso, toIso, topK, overFetch) {
-  const rows = runQueryWithVec(
-    `CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_emb_idx', $qv, ${overFetch})
+// Filtered vector search: project the Chunk table down to the date window
+// (Chunk.date is denormalised from Post) and query the index over that
+// projection. Over-fetching the whole index and filtering afterwards misses
+// the window entirely when older posts dominate the top hits — e.g. "最近の
+// アップデート" matches ~1,500 near-identical "Azure Updates" posts.
+let _projSeq = 0;
+function vectorSearchInDateRange(vec, fromIso, toIso, topK) {
+  const name = `dr${++_projSeq}`;
+  const lit  = (s) => esc(s).replace(/"/g, "");
+  runQuery(`CALL PROJECT_GRAPH('${name}', {'Chunk': 'n.date >= "${lit(fromIso)}" AND n.date < "${lit(toIso)}"'}, [])`);
+  try {
+    const rows = runQueryWithVec(
+      `CALL QUERY_VECTOR_INDEX('${name}', 'chunk_emb_idx', $qv, ${topK})
 YIELD node AS c, distance
 MATCH (p:Post)-[:HAS_CHUNK]->(c)
-WHERE p.date >= '${esc(fromIso)}' AND p.date < '${esc(toIso)}'
 RETURN p.title AS title, p.date AS date, p.url AS url, c.text AS text, ${ctxCol("c")}, c.id AS cid, distance
-ORDER BY distance
-LIMIT ${topK}`,
-    vec);
-  return rows.map(readChunk);
+ORDER BY distance`,
+      vec);
+    return rows.map(readChunk);
+  } finally {
+    try { runQuery(`CALL DROP_PROJECTED_GRAPH('${name}')`); } catch { }
+  }
 }
 
 function chunksByDateRange(fromIso, toIso, topK) {
@@ -330,7 +343,9 @@ function extractKeywordsFromTitle(title) {
 
 // ── Phase 1: recall (gather) ───────────────────────────────────────────────
 
-function gather(searchVec, q, opt, timer) {
+// vectorHits: the search vector's top hits when the caller already has them
+// (see retrieveOnce), so the index isn't queried twice for the same vector.
+function gather(searchVec, q, opt, timer, vectorHits = null) {
   const order = [];           // insertion-ordered cid list
   const chunk = {};           // cid → ChunkResult
   const graph = {};           // cid → max shared count
@@ -341,18 +356,20 @@ function gather(searchVec, q, opt, timer) {
     if ((graph[c.cid] ?? 0) < shared) graph[c.cid] = shared;
   }
 
-  if (q.date?.hard) {
-    const _s = performance.now();
-    vectorSearchInDateRange(searchVec, q.date.fromIso, q.date.toIso, opt.vectorTopK, opt.dateOverFetch)
-      .forEach(c => add(c, 0));
-    chunksByDateRange(q.date.fromIso, q.date.toIso, opt.vectorTopK)
-      .forEach(c => add(c, 0));
-    if (timer) timer.vsearch += performance.now() - _s;
+  const d  = q.date;
+  const _s = performance.now();
+  if (vectorHits) {
+    vectorHits.forEach(c => add(c, 0));
+  } else if (d?.hard) {
+    vectorSearchInDateRange(searchVec, d.fromIso, d.toIso, opt.vectorTopK).forEach(c => add(c, 0));
   } else {
-    const _s = performance.now();
     vectorSearch(searchVec, opt.vectorTopK).forEach(c => add(c, 0));
-    if (timer) timer.vsearch += performance.now() - _s;
+    // Soft window ("最近"): recall in-window chunks separately — a whole-index
+    // search can return none of them — and let DATE_BOOST prefer them in ranking.
+    if (d) vectorSearchInDateRange(searchVec, d.fromIso, d.toIso, opt.vectorTopK).forEach(c => add(c, 0));
   }
+  if (d?.hard) chunksByDateRange(d.fromIso, d.toIso, opt.vectorTopK).forEach(c => add(c, 0));
+  if (timer) timer.vsearch += performance.now() - _s;
 
   if (opt.useGraph) {
     const seeds = order.slice(0, 6);
@@ -433,15 +450,35 @@ function rankAndSelect(candidates, authority, origQ, opt) {
 
 // ── Retrieve: Fast / Normal (one recall pass) ──────────────────────────────
 
-function retrieveOnce(searchVec, origVec, searchQ, origQ, opt, timer) {
-  const candidates = gather(searchVec, searchQ, opt, timer);
-
+// The original question's top hits: the relevance pool rankAndSelect scores against.
+function authoritySearch(origVec, origQ, opt, timer) {
   const _sa = performance.now();
-  const authority = origQ.date?.hard
-    ? vectorSearchInDateRange(origVec, origQ.date.fromIso, origQ.date.toIso,
-        AUTHORITY_K, Math.max(opt.dateOverFetch, 600))
-    : vectorSearch(origVec, AUTHORITY_K);
+  const d = origQ.date;
+  let authority;
+  if (d?.hard) {
+    authority = vectorSearchInDateRange(origVec, d.fromIso, d.toIso, AUTHORITY_K);
+  } else {
+    authority = vectorSearch(origVec, AUTHORITY_K);
+    // Soft window: in-window hits must be in the relevance pool too, or
+    // rankAndSelect drops them before DATE_BOOST can apply.
+    if (d) {
+      const seen = new Set(authority.map(c => c.cid));
+      for (const c of vectorSearchInDateRange(origVec, d.fromIso, d.toIso, SOFT_WINDOW_K))
+        if (!seen.has(c.cid)) authority.push(c);
+    }
+  }
   if (timer) timer.auth += performance.now() - _sa;
+  return authority;
+}
+
+function retrieveOnce(searchVec, origVec, searchQ, origQ, opt, timer) {
+  // Without a query rewrite both vectors (and date windows) are the same, so the
+  // authority hits double as the recall pass's vector hits: its head is at least
+  // as good as a separate small-k query (a larger k only widens the HNSW search),
+  // and rankAndSelect scores candidates ∪ authority either way.
+  const sameQuery = searchVec === origVec;
+  const authority = authoritySearch(origVec, origQ, opt, timer);
+  const candidates = gather(searchVec, searchQ, opt, timer, sameQuery ? authority : null);
 
   const _sr = performance.now();
   const result = rankAndSelect(candidates, authority, origQ, opt);
@@ -473,12 +510,7 @@ async function retrieveDeep(origVec, searchVec, origQ, searchQ, opt, timer) {
     merge(gather(fv, { date: searchQ.date, keywords: tkw }, opt, timer));
   }
 
-  const _sa = performance.now();
-  const authority = origQ.date?.hard
-    ? vectorSearchInDateRange(origVec, origQ.date.fromIso, origQ.date.toIso,
-        AUTHORITY_K, Math.max(opt.dateOverFetch, 600))
-    : vectorSearch(origVec, AUTHORITY_K);
-  if (timer) timer.auth += performance.now() - _sa;
+  const authority = authoritySearch(origVec, origQ, opt, timer);
 
   const _sr = performance.now();
   const result = rankAndSelect([...all.values()], authority, origQ, opt);
@@ -527,7 +559,14 @@ self.onmessage = async ({ data: { id, type, payload } }) => {
       } else {
         _embeddingDevice = "none";
       }
-      self.postMessage({ id, type: "inited", payload: { ok: true, device: _embeddingDevice } });
+      // Newest post date anchors vague recency ("最近") to the data, not the
+      // wall clock — the corpus can lag today by months between rebuilds.
+      // ISO-8601 strings sort chronologically, so max() on the string works.
+      let latestPostDate = null;
+      try { latestPostDate = runQuery("MATCH (p:Post) RETURN max(p.date) AS d")[0]?.d ?? null; }
+      catch (e) { console.warn("[rag-worker] latest post date query failed:", e?.message); }
+
+      self.postMessage({ id, type: "inited", payload: { ok: true, device: _embeddingDevice, latestPostDate } });
 
     } else if (type === "retrieve") {
       if (!conn) throw new Error("Not initialised — call init first");

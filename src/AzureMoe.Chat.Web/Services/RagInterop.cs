@@ -26,8 +26,7 @@ public sealed record RetrievalOptions(
     int  VectorTopK     = 18,
     bool UseGraph       = true,
     bool IncludeRelated = false,
-    int  ExpansionLimit = 10,
-    int  DateOverFetch  = 400);
+    int  ExpansionLimit = 10);
 
 // ── RagInterop ─────────────────────────────────────────────────────────────
 
@@ -42,17 +41,19 @@ public sealed class RagInterop : IAsyncDisposable
     private readonly IJSRuntime        _js;
     private readonly NavigationManager _nav;
     private readonly AppConfig         _cfg;
+    private readonly QueryAnalyzer     _analyzer;
     private IJSObjectReference?        _module;
     private DotNetObjectReference<RagInterop>? _dotnetRef;
     private IProgress<(string Stage, string File, int Pct)>? _progress;
     private bool _initialised;
     public  bool IsInitialised => _initialised;
 
-    public RagInterop(IJSRuntime js, NavigationManager nav, AppConfig cfg)
+    public RagInterop(IJSRuntime js, NavigationManager nav, AppConfig cfg, QueryAnalyzer analyzer)
     {
-        _js  = js;
-        _nav = nav;
-        _cfg = cfg;
+        _js       = js;
+        _nav      = nav;
+        _cfg      = cfg;
+        _analyzer = analyzer;
     }
 
     private async ValueTask<IJSObjectReference> GetModuleAsync()
@@ -79,7 +80,11 @@ public sealed class RagInterop : IAsyncDisposable
         var m = await GetModuleAsync();
         var workerUrl = _nav.BaseUri.TrimEnd('/') + "/js/rag-worker.js";
         await m.InvokeVoidAsync("createRagWorker", ct, workerUrl);
-        await m.InvokeAsync<object>("initRag", ct, dbBytes, embedding, _dotnetRef, skipEmbedding);
+        var inited = await m.InvokeAsync<JsonElement>("initRag", ct, dbBytes, embedding, _dotnetRef, skipEmbedding);
+        _analyzer.DataAsOf =
+            inited.TryGetProperty("latestPostDate", out var d) && d.ValueKind == JsonValueKind.String
+            && DateTimeOffset.TryParse(d.GetString(), out var dto)
+                ? dto.UtcDateTime : null;
         _initialised = true;
     }
 
@@ -114,7 +119,6 @@ public sealed class RagInterop : IAsyncDisposable
                 useGraph       = opt.UseGraph,
                 includeRelated = opt.IncludeRelated,
                 expansionLimit = opt.ExpansionLimit,
-                dateOverFetch  = opt.DateOverFetch,
                 deepMaxRounds  = _cfg.DeepMaxRounds,
                 debug          = onDebug is not null,
             },

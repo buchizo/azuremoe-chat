@@ -39,17 +39,14 @@ public sealed class AppConfig
     // slow CPU. The Stop button covers the rest. Decoding uses light sampling
     // (see llm-worker.js) to avoid the greedy-repetition collapse.
     public int    LlmMaxNewTokens { get; set; } = 4096;
-    // Budgets for the auxiliary LLM steps (query rewrite, Deep-mode sufficiency
-    // evaluation). These finish in a line or two (stop at EOS).
+    // Budget for the auxiliary query-rewrite LLM step. It finishes in a line
+    // (stops at EOS).
     public int    LlmRewriteMaxTokens { get; set; } = 512;
-    public int    LlmEvalMaxTokens    { get; set; } = 512;
 
     // ── Embedding ──────────────────────────────────────────────────────────
-    // Must match the model used during ingest (same vector space).
-    public string EmbeddingModelId { get; set; } = "Xenova/multilingual-e5-small";
-    // transformers.js dtype for the embedding model. Must match the dtype used
-    // during ingest so query and passage vectors share the same quantized space.
-    // Supported: "q8" (INT8, default), "q4" (INT4), "fp32".
+    // Fallbacks only: the DB manifest's embeddingModel / embeddingDtype win
+    // (see Manifest.ToEmbeddingSpec), since queries must use the ingest model.
+    public string EmbeddingModelId { get; set; } = "sirasagi62/ruri-v3-30m-ONNX";
     public string EmbeddingDtype   { get; set; } = "q8";
 
     // ── RAG ───────────────────────────────────────────────────────────────
